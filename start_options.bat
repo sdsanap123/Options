@@ -47,6 +47,6 @@ echo Starting the Streamlit application...
 echo The app will open automatically in your browser.
 echo Press Ctrl+C to stop the server
 echo.
-streamlit run streamlit_app.py
+streamlit run app.py
 
 pause

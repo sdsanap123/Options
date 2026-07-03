@@ -93,6 +93,8 @@ if 'last_scan_time' not in st.session_state:
     st.session_state.last_scan_time = "Never"
 if 'scan_results' not in st.session_state:
     st.session_state.scan_results = []
+if 'all_ticker_metrics' not in st.session_state:
+    st.session_state.all_ticker_metrics = []
 if 'running' not in st.session_state:
     st.session_state.running = False
 
@@ -130,10 +132,10 @@ else:
 # 2. Timeframe Selection
 timeframe_label = st.sidebar.radio(
     "Select Timeframe",
-    options=["3-Minute (Ultra-Fast)", "5-Minute (Recommended)"],
+    options=["2-Minute (Ultra-Fast)", "5-Minute (Recommended)"],
     index=1
 )
-timeframe = "3m" if "3" in timeframe_label else "5m"
+timeframe = "2m" if "2" in timeframe_label else "5m"
 
 # 3. Setup parameters
 st.sidebar.markdown("---")
@@ -173,6 +175,7 @@ with col_btn2:
 
 if clear_clicked:
     st.session_state.scan_results = []
+    st.session_state.all_ticker_metrics = []
     st.session_state.last_scan_time = "Never"
     st.rerun()
 
@@ -182,6 +185,7 @@ def run_scan():
     my_bar = st.progress(0, text=progress_text)
     
     found_signals = []
+    all_metrics = []
     total = len(tickers)
     
     for idx, ticker in enumerate(tickers):
@@ -191,20 +195,44 @@ def run_scan():
         # Analyze with user thresholds
         res = analyze_ticker(ticker, interval=timeframe, period="5d", st_lookback=st_lookback, ignore_volume=ignore_vol)
         if res:
-            # Overwrite thresholds dynamically if customized
-            # If we bypassed volume filter, we skip volume ratio check or check it dynamically
-            if ignore_vol or res['volume_ratio'] >= vol_mult:
-                # Recalculate target with dynamic risk ratio
-                risk = res['risk']
-                close = res['current_price']
-                if res['direction'] == 'LONG':
-                    res['target_custom'] = close + (rr_factor * risk)
-                else:
-                    res['target_custom'] = close - (rr_factor * risk)
-                found_signals.append(res)
+            # Check if breakout setup was triggered
+            if res['setup_triggered']:
+                # Filter by volume breakout multiplier
+                if ignore_vol or res['volume_ratio'] >= vol_mult:
+                    # Recalculate target with dynamic risk ratio
+                    risk = res['risk']
+                    close = res['current_price']
+                    if res['direction'] == 'LONG':
+                        res['target_custom'] = close + (rr_factor * risk)
+                    else:
+                        res['target_custom'] = close - (rr_factor * risk)
+                    found_signals.append(res)
+            
+            # Save to all ticker metrics list
+            all_metrics.append({
+                "Symbol": symbol_name,
+                "Price (₹)": f"₹{res['current_price']:.2f}",
+                "VWAP": f"₹{res['vwap']:.2f}" if res['vwap'] else "N/A",
+                "9 EMA": f"₹{res['ema_9']:.2f}" if res['ema_9'] else "N/A",
+                "Volume Ratio": f"{res['volume_ratio']:.2f}x" if res['vol_sma20'] > 0 else "N/A",
+                "Direction": res['direction'] if res['setup_triggered'] else "N/A",
+                "Setup Triggered": "✅ Yes" if res['setup_triggered'] else "❌ No"
+            })
+        else:
+            # Handle API error or empty data gracefully in the summary table
+            all_metrics.append({
+                "Symbol": symbol_name,
+                "Price (₹)": "N/A",
+                "VWAP": "N/A",
+                "9 EMA": "N/A",
+                "Volume Ratio": "N/A",
+                "Direction": "N/A",
+                "Setup Triggered": "❌ No (No Data)"
+            })
                 
     my_bar.empty()
     st.session_state.scan_results = found_signals
+    st.session_state.all_ticker_metrics = all_metrics
     st.session_state.last_scan_time = datetime.now().strftime("%H:%M:%S")
 
 # Handle Trigger
@@ -391,43 +419,8 @@ with tab3:
     if st.session_state.last_scan_time == "Never":
         st.info("Run a scan to view ticker metrics.")
     else:
-        # Build DataFrame of all scanned tickers
-        records = []
-        for ticker in tickers:
-            symbol_name = ticker.replace(".NS", "")
-            res = analyze_ticker(ticker, interval=timeframe, period="2d", st_lookback=st_lookback, ignore_volume=ignore_vol)
-            
-            if res:
-                records.append({
-                    "Symbol": symbol_name,
-                    "Price (₹)": f"₹{res['current_price']:.2f}",
-                    "VWAP": f"₹{res['vwap']:.2f}",
-                    "9 EMA": f"₹{res['ema_9']:.2f}",
-                    "Volume Ratio": f"{res['volume_ratio']:.2f}x",
-                    "Direction": res['direction'],
-                    "Setup Triggered": "✅ Yes"
-                })
-            else:
-                # Add default raw metrics
-                try:
-                    df = yf.download(ticker, period="1d", interval=timeframe, progress=False)
-                    if not df.empty:
-                        last_close = float(df['Close'].iloc[-1])
-                        last_vol = float(df['Volume'].iloc[-1])
-                        records.append({
-                            "Symbol": symbol_name,
-                            "Price (₹)": f"₹{last_close:.2f}",
-                            "VWAP": "N/A",
-                            "9 EMA": "N/A",
-                            "Volume Ratio": "N/A",
-                            "Direction": "N/A",
-                            "Setup Triggered": "❌ No"
-                        })
-                except:
-                    pass
-                    
-        if records:
-            df_log = pd.DataFrame(records)
+        if st.session_state.all_ticker_metrics:
+            df_log = pd.DataFrame(st.session_state.all_ticker_metrics)
             st.dataframe(df_log, use_container_width=True)
         else:
             st.warning("No data retrieved for scanned tickers.")

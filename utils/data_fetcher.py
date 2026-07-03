@@ -133,7 +133,7 @@ def analyze_ticker(symbol: str, interval: str = "5m", period: str = "5d", st_loo
                     
                 return {
                     'symbol': symbol,
-                    'timestamp': df.index[offset].strftime('%H:%M:%S'),
+                    'timestamp': df.index[offset].strftime('%H:%M:%S') if hasattr(df.index[offset], 'strftime') else str(df.index[offset]),
                     'direction': direction,
                     'current_price': close,
                     'vwap': vwap,
@@ -148,10 +148,39 @@ def analyze_ticker(symbol: str, interval: str = "5m", period: str = "5d", st_loo
                     'target_2_0': target_2_0,
                     'risk': risk,
                     'df': df.tail(50), # Keep tail for plotting
-                    'candle_type': 'Live/Incomplete' if offset == -1 else 'Closed'
+                    'candle_type': 'Live/Incomplete' if offset == -1 else 'Closed',
+                    'setup_triggered': True
                 }
                 
-        return None
+        # If no setup triggered, return default metrics from the latest candle (offset -1)
+        row = df.iloc[-1]
+        close = float(row['Close'])
+        volume = float(row['Volume'])
+        vol_sma = float(row['Vol_SMA20']) if 'Vol_SMA20' in row else 0
+        vwap = float(row['VWAP']) if 'VWAP' in row else close
+        ema_9 = float(row['EMA_9']) if 'EMA_9' in row else close
+        st_line = float(row['ST_Line']) if 'ST_Line' in row else close
+        
+        return {
+            'symbol': symbol,
+            'timestamp': df.index[-1].strftime('%H:%M:%S') if hasattr(df.index[-1], 'strftime') else str(df.index[-1]),
+            'direction': 'N/A',
+            'current_price': close,
+            'vwap': vwap,
+            'ema_9': ema_9,
+            'supertrend': st_line,
+            'volume': volume,
+            'vol_sma20': vol_sma,
+            'volume_ratio': volume / vol_sma if vol_sma > 0 else 0,
+            'stop_loss': close,
+            'sl_source': 'N/A',
+            'target_1_5': close,
+            'target_2_0': close,
+            'risk': 0.0,
+            'df': df.tail(50),
+            'candle_type': 'Live/Incomplete',
+            'setup_triggered': False
+        }
         
     except Exception as e:
         logger.error(f"Error analyzing {symbol}: {str(e)}")
