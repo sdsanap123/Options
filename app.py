@@ -246,6 +246,50 @@ tab1, tab2, tab3 = st.tabs(["🔥 Active Signals", "📈 Live Interactive Charti
 
 # TAB 1: Active Signals
 with tab1:
+    with st.expander("📖 Trading Strategy & Entry Trigger Rules (09:20 AM - 10:00 AM)", expanded=True):
+        _strategy_html = (
+            '<div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:1.2rem;">'
+            '<p style="color:#8a99ad;font-size:0.95rem;margin-bottom:1rem;line-height:1.5;">'
+            '⚡ <strong>Once a stock pops up on your scan between 09:20 AM and 10:00 AM:</strong> '
+            'Open its chart and look for the exact entry trigger below.'
+            '</p>'
+            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;">'
+
+            '<div style="background:rgba(40,167,69,0.07);border-left:4px solid #28a745;border-radius:6px;padding:1rem;">'
+            '<div style="color:#28a745;font-weight:700;font-size:1rem;margin-bottom:0.6rem;">🟢 Long Setup — Call Options / Futures</div>'
+            '<ul style="margin:0;padding-left:1.2rem;color:#e5e7eb;font-size:0.88rem;line-height:1.55;">'
+            '<li style="margin-bottom:0.35rem;"><strong>Entry:</strong> 3-min candle closes <em>above</em> both VWAP &amp; 9 EMA while Supertrend is green.</li>'
+            '<li style="margin-bottom:0.35rem;"><strong>Confirmation:</strong> Distinct tall green volume bar on the breakout candle.</li>'
+            '<li style="margin-bottom:0.35rem;"><strong>Stop-Loss:</strong> At the 9 EMA or Supertrend (whichever is closer). Cut instantly on a close below.</li>'
+            '<li><strong>Target:</strong> Exit when candle closes below 9 EMA, or 1:1.5–1:2 R:R.</li>'
+            '</ul></div>'
+
+            '<div style="background:rgba(220,53,69,0.07);border-left:4px solid #dc3545;border-radius:6px;padding:1rem;">'
+            '<div style="color:#dc3545;font-weight:700;font-size:1rem;margin-bottom:0.6rem;">🔴 Short Setup — Put Options / Short Futures</div>'
+            '<ul style="margin:0;padding-left:1.2rem;color:#e5e7eb;font-size:0.88rem;line-height:1.55;">'
+            '<li style="margin-bottom:0.35rem;"><strong>Entry:</strong> 3-min candle closes <em>below</em> both VWAP &amp; 9 EMA while Supertrend is red.</li>'
+            '<li style="margin-bottom:0.35rem;"><strong>Confirmation:</strong> Heavy surge in volume on the breakdown candle.</li>'
+            '<li style="margin-bottom:0.35rem;"><strong>Stop-Loss:</strong> At the 9 EMA or Supertrend line.</li>'
+            '<li><strong>Target:</strong> Exit when a candle closes back above the 9 EMA.</li>'
+            '</ul></div>'
+
+            '</div>'
+
+            '<div style="background:rgba(255,193,7,0.05);border-left:4px solid #ffc107;border-radius:6px;padding:1rem;">'
+            '<div style="color:#ffc107;font-weight:700;font-size:1rem;margin-bottom:0.6rem;">💡 Pro-Tips for the Indian Market</div>'
+            '<div style="font-size:0.88rem;color:#d1d5db;line-height:1.55;">'
+            '<p style="margin:0 0 0.4rem;"><strong>The 09:45 AM Trap:</strong> The first 15 min (09:15–09:30) are wildly erratic due to overnight order clearing. '
+            'If a signal fires at 09:18, wait for the 09:25 candle to confirm above VWAP. Fake breakouts are common in the first 10 minutes.</p>'
+            '<p style="margin:0 0 0.4rem;"><strong>The Nifty Alignment Rule:</strong> If you are long a stock but Nifty / Bank Nifty is crashing, skip the trade. '
+            'Intraday stock trends rarely survive a fighting broader index.</p>'
+            '<p style="margin:0;"><strong>Exit by 02:45 PM:</strong> Momentum dries up or violently reverses after 03:00 PM due to MIS auto-square-offs '
+            'by brokers (Zerodha, Groww, Angel One). Wrap up all momentum trades well before then.</p>'
+            '</div></div>'
+
+            '</div>'
+        )
+        st.markdown(_strategy_html, unsafe_allow_html=True)
+
     col_stat1, col_stat2 = st.columns([3, 1])
     with col_stat1:
         st.markdown(f"**Last Scanned At:** `{st.session_state.last_scan_time}` | **Timeframe:** `{timeframe}` | **Total Tickers:** `{len(tickers)}`")
@@ -391,25 +435,206 @@ with tab2:
                 name="20-Vol SMA"
             ), row=2, col=1)
             
-            # Styling Layout
+            # ── Projection: Next 30 min (10 × 3-min candles) ──────────────────
+            PROJ_CANDLES   = 10          # 10 candles × 3 min = 30 min
+            CANDLE_MINS    = 3           # minutes per candle for labelling
+            EMA_K          = 2 / (9 + 1) # EMA smoothing factor
+
+            # ── Price trend: linear slope from last 5 candles ──────────────────
+            price_tail   = df['Close'].tail(5).values
+            price_slope  = np.polyfit(range(len(price_tail)), price_tail, 1)[0]  # ₹ per candle
+
+            # ── ATR (last 14 candles) for uncertainty band ─────────────────────
+            atr_tail = df['ST_Line'].tail(14)  # Use ST line proximity as proxy
+            raw_atr  = (df['High'] - df['Low']).tail(14).mean()
+
+            # ── VWAP projection ────────────────────────────────────────────────
+            # Back-calculate cumTPV and cumVol for today's session from the df
+            # VWAP[t] = cumTPV[t] / cumVol[t]  →  cumTPV[-1] = VWAP[-1] * cumVol[-1]
+            today = df.index[-1].date() if hasattr(df.index[-1], 'date') else None
+            if today is not None:
+                today_mask = pd.Series(df.index).apply(lambda x: x.date() == today if hasattr(x, 'date') else True).values
+                df_today   = df[today_mask]
+            else:
+                df_today   = df
+
+            cum_vol   = float(df_today['Volume'].sum())
+            cum_tpv   = float(df['VWAP'].iloc[-1]) * cum_vol
+            avg_vol   = float(df_today['Volume'].tail(10).mean()) if len(df_today) >= 10 else float(df_today['Volume'].mean())
+
+            # ── Build future timestamps ─────────────────────────────────────────
+            last_ts   = df.index[-1]
+            freq_min  = int(timeframe.replace('m', ''))  # actual chart timeframe (2 or 5 min)
+            future_ts = pd.date_range(start=last_ts, periods=PROJ_CANDLES + 1, freq=f'{freq_min}min')[1:]
+
+            # ── Iterate candles and project ────────────────────────────────────
+            proj_vwap = []
+            proj_ema  = []
+            proj_vwap_high = []  # optimistic: +0.5 ATR on price
+            proj_vwap_low  = []  # pessimistic: −0.5 ATR on price
+            proj_ema_high  = []
+            proj_ema_low   = []
+
+            last_ema  = float(df['EMA_9'].iloc[-1])
+            last_price = float(df['Close'].iloc[-1])
+
+            cum_vol_h  = cum_vol
+            cum_tpv_h  = cum_tpv
+            cum_vol_l  = cum_vol
+            cum_tpv_l  = cum_tpv
+            prev_ema_h = last_ema
+            prev_ema_l = last_ema
+
+            for i in range(1, PROJ_CANDLES + 1):
+                # Central projection (trend)
+                proj_price = last_price + price_slope * i
+                cum_tpv   += proj_price * avg_vol
+                cum_vol   += avg_vol
+                v = cum_tpv / cum_vol if cum_vol > 0 else proj_price
+                proj_vwap.append(round(v, 2))
+                ema_c = proj_price * EMA_K + (proj_ema[-1] if proj_ema else last_ema) * (1 - EMA_K)
+                proj_ema.append(round(ema_c, 2))
+
+                # Optimistic (+0.5 ATR above trend)
+                p_h = proj_price + 0.5 * raw_atr
+                cum_tpv_h += p_h * avg_vol
+                cum_vol_h += avg_vol
+                proj_vwap_high.append(round(cum_tpv_h / cum_vol_h, 2))
+                ema_h = p_h * EMA_K + prev_ema_h * (1 - EMA_K)
+                proj_ema_high.append(round(ema_h, 2))
+                prev_ema_h = ema_h
+
+                # Pessimistic (−0.5 ATR below trend)
+                p_l = proj_price - 0.5 * raw_atr
+                cum_tpv_l += p_l * avg_vol
+                cum_vol_l += avg_vol
+                proj_vwap_low.append(round(cum_tpv_l / cum_vol_l, 2))
+                ema_l = p_l * EMA_K + prev_ema_l * (1 - EMA_K)
+                proj_ema_low.append(round(ema_l, 2))
+                prev_ema_l = ema_l
+
+            # Stitch historical last point → future (for continuous lines)
+            x_proj = [last_ts] + list(future_ts)
+            v_proj_vwap      = [float(df['VWAP'].iloc[-1])] + proj_vwap
+            v_proj_ema       = [float(df['EMA_9'].iloc[-1])] + proj_ema
+            v_proj_vwap_h    = [float(df['VWAP'].iloc[-1])] + proj_vwap_high
+            v_proj_vwap_l    = [float(df['VWAP'].iloc[-1])] + proj_vwap_low
+            v_proj_ema_h     = [float(df['EMA_9'].iloc[-1])] + proj_ema_high
+            v_proj_ema_l     = [float(df['EMA_9'].iloc[-1])] + proj_ema_low
+
+            hover_labels = [last_ts.strftime('%H:%M')] + [
+                f"+{i * freq_min}m  {t.strftime('%H:%M')}" for i, t in enumerate(future_ts, 1)
+            ]
+
+            # ── VWAP prediction band (fill) ────────────────────────────────────
+            fig.add_trace(go.Scatter(
+                x=x_proj + x_proj[::-1],
+                y=v_proj_vwap_h + v_proj_vwap_l[::-1],
+                fill='toself',
+                fillcolor='rgba(255,152,0,0.08)',
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo='skip',
+                name='VWAP Band'
+            ), row=1, col=1)
+
+            # ── EMA prediction band (fill) ─────────────────────────────────────
+            fig.add_trace(go.Scatter(
+                x=x_proj + x_proj[::-1],
+                y=v_proj_ema_h + v_proj_ema_l[::-1],
+                fill='toself',
+                fillcolor='rgba(33,150,243,0.07)',
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo='skip',
+                name='EMA Band'
+            ), row=1, col=1)
+
+            # ── Projected VWAP line (dashed orange) ────────────────────────────
+            fig.add_trace(go.Scatter(
+                x=x_proj,
+                y=v_proj_vwap,
+                mode='lines+markers',
+                line=dict(color='#ff9800', width=2, dash='dot'),
+                marker=dict(size=5, symbol='circle-open', color='#ff9800'),
+                name='Proj VWAP',
+                text=[f"Proj VWAP: ₹{v:.2f}<br>{lbl}" for v, lbl in zip(v_proj_vwap, hover_labels)],
+                hoverinfo='text'
+            ), row=1, col=1)
+
+            # ── Projected 9 EMA line (dashed blue) ────────────────────────────
+            fig.add_trace(go.Scatter(
+                x=x_proj,
+                y=v_proj_ema,
+                mode='lines+markers',
+                line=dict(color='#64b5f6', width=2, dash='dot'),
+                marker=dict(size=5, symbol='circle-open', color='#64b5f6'),
+                name='Proj 9 EMA',
+                text=[f"Proj EMA: ₹{v:.2f}<br>{lbl}" for v, lbl in zip(v_proj_ema, hover_labels)],
+                hoverinfo='text'
+            ), row=1, col=1)
+
+            # ── Vertical separator at "now" ────────────────────────────────────
+            fig.add_vline(
+                x=last_ts.timestamp() * 1000,
+                line=dict(color='rgba(255,255,255,0.25)', width=1.5, dash='dash'),
+                row=1, col=1
+            )
+            fig.add_annotation(
+                x=last_ts, y=1, yref='paper',
+                text='<b>Now →</b>',
+                showarrow=False,
+                font=dict(color='rgba(255,255,255,0.5)', size=11),
+                xanchor='left', xshift=6
+            )
+            # ──────────────────────────────────────────────────────────────────
+
+            # Styling Layout (no title inside the figure — moved below chart to avoid legend overlap)
             fig.update_layout(
                 height=700,
                 xaxis_rangeslider_visible=False,
                 paper_bgcolor='#11151c',
                 plot_bgcolor='#11151c',
                 font_color='#8a99ad',
-                title_text=f"{selected_sig_symbol.replace('.NS', '')} Intraday Setup Analysis ({timeframe})",
-                title_x=0.5,
-                margin=dict(t=50, b=50, l=30, r=30),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                margin=dict(t=20, b=50, l=30, r=30),
+                legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="left", x=0)
             )
-            
+
             fig.update_xaxes(gridcolor='rgba(255,255,255,0.05)', row=1, col=1)
             fig.update_yaxes(gridcolor='rgba(255,255,255,0.05)', row=1, col=1)
             fig.update_xaxes(gridcolor='rgba(255,255,255,0.05)', row=2, col=1)
             fig.update_yaxes(gridcolor='rgba(255,255,255,0.05)', row=2, col=1)
-            
+
             st.plotly_chart(fig, use_container_width=True)
+
+            # ── Chart title (below chart to avoid overlapping legend) ──────────
+            chart_title = f"{selected_sig_symbol.replace('.NS', '')} — Intraday Setup + 30-Min Projection ({timeframe})"
+            st.markdown(
+                f'<div style="text-align:center;color:#8a99ad;font-size:0.95rem;margin-top:-0.5rem;margin-bottom:1rem;">'
+                f'📊 {chart_title}</div>',
+                unsafe_allow_html=True
+            )
+
+            # ── Projection data table ──────────────────────────────────────────
+            with st.expander("📋 Projection Data Table (Next 30 min)", expanded=False):
+                proj_df = pd.DataFrame({
+                    'Time': [t.strftime('%H:%M') for t in future_ts],
+                    'Candle': [f"+{i * freq_min}m" for i in range(1, PROJ_CANDLES + 1)],
+                    'Proj Price (Trend)': [f"₹{last_price + price_slope * i:.2f}" for i in range(1, PROJ_CANDLES + 1)],
+                    'Proj VWAP': [f"₹{v:.2f}" for v in proj_vwap],
+                    'Proj 9 EMA': [f"₹{v:.2f}" for v in proj_ema],
+                    'VWAP Range': [f"₹{l:.2f} – ₹{h:.2f}" for l, h in zip(proj_vwap_low, proj_vwap_high)],
+                    'EMA Range':  [f"₹{l:.2f} – ₹{h:.2f}" for l, h in zip(proj_ema_low,  proj_ema_high)],
+                })
+                st.dataframe(proj_df, use_container_width=True, hide_index=True)
+            
+            st.caption(
+                "⚠️ Projection assumes recent price trend continues. "
+                "Shaded bands show ±0.5 ATR uncertainty. "
+                "These are **statistical estimates**, not guaranteed levels — "
+                "always confirm with live price action."
+            )
+
 
 # TAB 3: All Scanned Tickers reference
 with tab3:
