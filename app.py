@@ -169,9 +169,9 @@ refresh_interval = st.sidebar.slider("Refresh Interval (seconds)", min_value=10,
 # Main Scan Trigger Button
 col_btn1, col_btn2 = st.sidebar.columns(2)
 with col_btn1:
-    scan_clicked = st.button("🔍 Scan Now", use_container_width=True)
+    scan_clicked = st.button("🔍 Scan Now", width='stretch')
 with col_btn2:
-    clear_clicked = st.button("🧹 Clear Logs", use_container_width=True)
+    clear_clicked = st.button("🧹 Clear Logs", width='stretch')
 
 if clear_clicked:
     st.session_state.scan_results = []
@@ -605,7 +605,7 @@ with tab2:
             fig.update_xaxes(gridcolor='rgba(255,255,255,0.05)', row=2, col=1)
             fig.update_yaxes(gridcolor='rgba(255,255,255,0.05)', row=2, col=1)
 
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
             # ── Chart title (below chart to avoid overlapping legend) ──────────
             chart_title = f"{selected_sig_symbol.replace('.NS', '')} — Intraday Setup + 30-Min Projection ({timeframe})"
@@ -626,7 +626,7 @@ with tab2:
                     'VWAP Range': [f"₹{l:.2f} – ₹{h:.2f}" for l, h in zip(proj_vwap_low, proj_vwap_high)],
                     'EMA Range':  [f"₹{l:.2f} – ₹{h:.2f}" for l, h in zip(proj_ema_low,  proj_ema_high)],
                 })
-                st.dataframe(proj_df, use_container_width=True, hide_index=True)
+                st.dataframe(proj_df, width='stretch', hide_index=True)
             
             st.caption(
                 "⚠️ Projection assumes recent price trend continues. "
@@ -646,7 +646,7 @@ with tab3:
     else:
         if st.session_state.all_ticker_metrics:
             df_log = pd.DataFrame(st.session_state.all_ticker_metrics)
-            st.dataframe(df_log, use_container_width=True)
+            st.dataframe(df_log, width='stretch')
         else:
             st.warning("No data retrieved for scanned tickers.")
 
