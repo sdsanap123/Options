@@ -97,6 +97,8 @@ if 'all_ticker_metrics' not in st.session_state:
     st.session_state.all_ticker_metrics = []
 if 'running' not in st.session_state:
     st.session_state.running = False
+if 'scan_params' not in st.session_state:
+    st.session_state.scan_params = None
 
 # Sidebar Configuration
 st.sidebar.markdown("### ⚙️ Scanner Settings")
@@ -104,7 +106,8 @@ st.sidebar.markdown("### ⚙️ Scanner Settings")
 # 1. Ticker Source Selection
 ticker_source = st.sidebar.selectbox(
     "Select Ticker List",
-    options=["Nifty 50", "Bank Nifty", "High Beta / Options Active", "All NSE Stocks", "Custom List"]
+    options=["Nifty 50", "Bank Nifty", "High Beta / Options Active", "All NSE Stocks", "Custom List"],
+    index=2
 )
 
 if ticker_source == "Custom List":
@@ -177,6 +180,7 @@ if clear_clicked:
     st.session_state.scan_results = []
     st.session_state.all_ticker_metrics = []
     st.session_state.last_scan_time = "Never"
+    st.session_state.scan_params = None
     st.rerun()
 
 # Run scan function
@@ -234,6 +238,16 @@ def run_scan():
     st.session_state.scan_results = found_signals
     st.session_state.all_ticker_metrics = all_metrics
     st.session_state.last_scan_time = datetime.now().strftime("%H:%M:%S")
+    st.session_state.scan_params = {
+        'timeframe': timeframe,
+        'ticker_source': ticker_source,
+        'tickers_count': len(tickers),
+        'vol_mult': vol_mult,
+        'st_lookback': st_lookback,
+        'ignore_vol': ignore_vol,
+        'rr_ratio': rr_ratio,
+        'rr_factor': rr_factor
+    }
 
 # Handle Trigger
 if scan_clicked or (auto_refresh and not st.session_state.running):
@@ -292,7 +306,9 @@ with tab1:
 
     col_stat1, col_stat2 = st.columns([3, 1])
     with col_stat1:
-        st.markdown(f"**Last Scanned At:** `{st.session_state.last_scan_time}` | **Timeframe:** `{timeframe}` | **Total Tickers:** `{len(tickers)}`")
+        display_timeframe = st.session_state.scan_params['timeframe'] if st.session_state.scan_params else timeframe
+        display_tickers_count = st.session_state.scan_params['tickers_count'] if st.session_state.scan_params else len(tickers)
+        st.markdown(f"**Last Scanned At:** `{st.session_state.last_scan_time}` | **Timeframe:** `{display_timeframe}` | **Total Tickers:** `{display_tickers_count}`")
     with col_stat2:
         if st.session_state.last_scan_time != "Never":
             st.success(f"Found {len(st.session_state.scan_results)} setups!")
@@ -347,12 +363,12 @@ with tab1:
                         <div class="metric-value" style="color: #dc3545;">₹{stop_loss:.2f} ({abs(curr_price-stop_loss)/curr_price*100:.2f}%)</div>
                     </div>
                     <div>
-                        <div class="metric-label">Breakout Target ({rr_ratio})</div>
+                        <div class="metric-label">Breakout Target ({st.session_state.scan_params['rr_ratio'] if st.session_state.scan_params else rr_ratio})</div>
                         <div class="metric-value" style="color: #28a745;">₹{target:.2f}</div>
                     </div>
                     <div>
                         <div class="metric-label">Risk-to-Reward Setup</div>
-                        <div class="metric-value" style="font-size: 1.1rem; font-weight: 500; color: #29b6f6;">1 : {rr_factor} Ratio</div>
+                        <div class="metric-value" style="font-size: 1.1rem; font-weight: 500; color: #29b6f6;">1 : {st.session_state.scan_params['rr_factor'] if st.session_state.scan_params else rr_factor} Ratio</div>
                     </div>
                 </div>
             </div>
@@ -462,9 +478,11 @@ with tab2:
             cum_tpv   = float(df['VWAP'].iloc[-1]) * cum_vol
             avg_vol   = float(df_today['Volume'].tail(10).mean()) if len(df_today) >= 10 else float(df_today['Volume'].mean())
 
+
             # ── Build future timestamps ─────────────────────────────────────────
             last_ts   = df.index[-1]
-            freq_min  = int(timeframe.replace('m', ''))  # actual chart timeframe (2 or 5 min)
+            display_tf = st.session_state.scan_params['timeframe'] if st.session_state.scan_params else timeframe
+            freq_min  = int(display_tf.replace('m', ''))  # actual chart timeframe (2 or 5 min)
             future_ts = pd.date_range(start=last_ts, periods=PROJ_CANDLES + 1, freq=f'{freq_min}min')[1:]
 
             # ── Iterate candles and project ────────────────────────────────────
@@ -499,7 +517,8 @@ with tab2:
                 p_h = proj_price + 0.5 * raw_atr
                 cum_tpv_h += p_h * avg_vol
                 cum_vol_h += avg_vol
-                proj_vwap_high.append(round(cum_tpv_h / cum_vol_h, 2))
+                v_h = cum_tpv_h / cum_vol_h if cum_vol_h > 0 else p_h
+                proj_vwap_high.append(round(v_h, 2))
                 ema_h = p_h * EMA_K + prev_ema_h * (1 - EMA_K)
                 proj_ema_high.append(round(ema_h, 2))
                 prev_ema_h = ema_h
@@ -508,7 +527,8 @@ with tab2:
                 p_l = proj_price - 0.5 * raw_atr
                 cum_tpv_l += p_l * avg_vol
                 cum_vol_l += avg_vol
-                proj_vwap_low.append(round(cum_tpv_l / cum_vol_l, 2))
+                v_l = cum_tpv_l / cum_vol_l if cum_vol_l > 0 else p_l
+                proj_vwap_low.append(round(v_l, 2))
                 ema_l = p_l * EMA_K + prev_ema_l * (1 - EMA_K)
                 proj_ema_low.append(round(ema_l, 2))
                 prev_ema_l = ema_l
@@ -608,7 +628,8 @@ with tab2:
             st.plotly_chart(fig, width='stretch')
 
             # ── Chart title (below chart to avoid overlapping legend) ──────────
-            chart_title = f"{selected_sig_symbol.replace('.NS', '')} — Intraday Setup + 30-Min Projection ({timeframe})"
+            display_tf = st.session_state.scan_params['timeframe'] if st.session_state.scan_params else timeframe
+            chart_title = f"{selected_sig_symbol.replace('.NS', '')} — Intraday Setup + 30-Min Projection ({display_tf})"
             st.markdown(
                 f'<div style="text-align:center;color:#8a99ad;font-size:0.95rem;margin-top:-0.5rem;margin-bottom:1rem;">'
                 f'📊 {chart_title}</div>',
