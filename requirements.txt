@@ -36,3 +36,4 @@ TA-Lib>=0.4.28
 scipy>=1.11.1
 streamlit>=1.25.0
 plotly>=5.15.0
+groq>=0.9.0

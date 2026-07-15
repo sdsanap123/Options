@@ -14,6 +14,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from utils.tickers import ALL_CATEGORIES
 from utils.data_fetcher import analyze_ticker
 from utils.stock_utils import load_equity_data
+from utils.ai_analyzer import score_signal, get_news_sentiment
 
 # Set Streamlit page config
 st.set_page_config(
@@ -99,9 +100,48 @@ if 'running' not in st.session_state:
     st.session_state.running = False
 if 'scan_params' not in st.session_state:
     st.session_state.scan_params = None
+if 'groq_api_key' not in st.session_state:
+    st.session_state.groq_api_key = os.getenv("GROQ_API_KEY", "")
 
 # Sidebar Configuration
 st.sidebar.markdown("### ⚙️ Scanner Settings")
+
+# ── AI Settings ───────────────────────────────────────────────────────────────
+st.sidebar.markdown("### 🤖 AI Settings (Groq)")
+groq_key_input = st.sidebar.text_input(
+    "Groq API Key",
+    value=st.session_state.groq_api_key,
+    type="password",
+    help="Get a free key at console.groq.com"
+)
+if groq_key_input:
+    st.session_state.groq_api_key = groq_key_input
+    os.environ["GROQ_API_KEY"] = groq_key_input
+
+ai_enabled = st.sidebar.checkbox(
+    "🧠 Enable AI Analysis",
+    value=bool(st.session_state.groq_api_key),
+    help="Score each signal with Groq AI (0–100 confidence) and filter by news sentiment."
+)
+if ai_enabled and not st.session_state.groq_api_key:
+    st.sidebar.warning("⚠️ Enter a Groq API key above to enable AI.")
+    ai_enabled = False
+
+min_ai_score = st.sidebar.slider(
+    "Min AI Confidence Score",
+    min_value=0, max_value=100, value=50, step=5,
+    disabled=not ai_enabled,
+    help="Only show signals with AI score ≥ this value."
+) if ai_enabled else 0
+
+block_negative_news = st.sidebar.checkbox(
+    "🚫 Block Negative-News Signals",
+    value=True,
+    disabled=not ai_enabled,
+    help="Suppress signals where Groq detects strongly negative news."
+) if ai_enabled else False
+
+st.sidebar.markdown("---")
 
 # 1. Ticker Source Selection
 ticker_source = st.sidebar.selectbox(
@@ -185,34 +225,64 @@ if clear_clicked:
 
 # Run scan function
 def run_scan():
-    progress_text = "Scanning tickers..."
-    my_bar = st.progress(0, text=progress_text)
-    
     found_signals = []
     all_metrics = []
     total = len(tickers)
-    
+
+    my_bar = st.progress(0, text="Scanning tickers...")
+
     for idx, ticker in enumerate(tickers):
         symbol_name = ticker.replace(".NS", "")
         my_bar.progress((idx + 1) / total, text=f"Analyzing {symbol_name} ({idx+1}/{total})")
-        
-        # Analyze with user thresholds
+
         res = analyze_ticker(ticker, interval=timeframe, period="5d", st_lookback=st_lookback, ignore_volume=ignore_vol)
+
         if res:
-            # Check if breakout setup was triggered
             if res['setup_triggered']:
-                # Filter by volume breakout multiplier
                 if ignore_vol or res['volume_ratio'] >= vol_mult:
                     # Recalculate target with dynamic risk ratio
                     risk = res['risk']
                     close = res['current_price']
-                    if res['direction'] == 'LONG':
-                        res['target_custom'] = close + (rr_factor * risk)
+                    res['target_custom'] = close + (rr_factor * risk) if res['direction'] == 'LONG' else close - (rr_factor * risk)
+
+                    # ── AI: News Sentiment ──────────────────────────────────────
+                    if ai_enabled:
+                        my_bar.progress((idx + 1) / total, text=f"🤖 AI: News for {symbol_name}...")
+                        news = get_news_sentiment(ticker)
+                        res['ai_news'] = news
+
+                        # Block if strongly negative news
+                        if block_negative_news and not news.get('should_trade', True):
+                            res['ai_blocked'] = True
+                            res['ai_block_reason'] = f"Blocked: {news.get('sentiment')} news — {news.get('summary', '')}"
+                        else:
+                            res['ai_blocked'] = False
+
+                        # ── AI: Signal Scoring ──────────────────────────────────
+                        my_bar.progress((idx + 1) / total, text=f"🤖 AI: Scoring {symbol_name}...")
+                        ai_score = score_signal(res)
+                        res['ai_score'] = ai_score
+
+                        # Filter by minimum AI score
+                        if ai_score['score'] < min_ai_score:
+                            res['ai_blocked'] = True
+                            res['ai_block_reason'] = res.get('ai_block_reason', '') or f"Score {ai_score['score']} below threshold {min_ai_score}."
                     else:
-                        res['target_custom'] = close - (rr_factor * risk)
-                    found_signals.append(res)
-            
-            # Save to all ticker metrics list
+                        res['ai_news'] = None
+                        res['ai_score'] = None
+                        res['ai_blocked'] = False
+
+                    if not res.get('ai_blocked', False):
+                        found_signals.append(res)
+
+            # ── Metrics table entry ─────────────────────────────────────────────
+            ai_col = ""
+            if ai_enabled and res.get('ai_score'):
+                s = res['ai_score']
+                ai_col = f"{s['score']}/100 ({s['grade']})"
+            elif ai_enabled and res.get('ai_blocked'):
+                ai_col = "🚫 Blocked"
+
             all_metrics.append({
                 "Symbol": symbol_name,
                 "Price (₹)": f"₹{res['current_price']:.2f}",
@@ -220,10 +290,10 @@ def run_scan():
                 "9 EMA": f"₹{res['ema_9']:.2f}" if res['ema_9'] else "N/A",
                 "Volume Ratio": f"{res['volume_ratio']:.2f}x" if res['vol_sma20'] > 0 else "N/A",
                 "Direction": res['direction'] if res['setup_triggered'] else "N/A",
-                "Setup Triggered": "✅ Yes" if res['setup_triggered'] else "❌ No"
+                "Setup Triggered": "✅ Yes" if res['setup_triggered'] else "❌ No",
+                "AI Score": ai_col if ai_col else "—",
             })
         else:
-            # Handle API error or empty data gracefully in the summary table
             all_metrics.append({
                 "Symbol": symbol_name,
                 "Price (₹)": "N/A",
@@ -231,10 +301,16 @@ def run_scan():
                 "9 EMA": "N/A",
                 "Volume Ratio": "N/A",
                 "Direction": "N/A",
-                "Setup Triggered": "❌ No (No Data)"
+                "Setup Triggered": "❌ No (No Data)",
+                "AI Score": "—",
             })
-                
+
     my_bar.empty()
+
+    # Sort signals by AI score descending (highest conviction first)
+    if ai_enabled:
+        found_signals.sort(key=lambda s: s.get('ai_score', {}).get('score', 0) if s.get('ai_score') else 0, reverse=True)
+
     st.session_state.scan_results = found_signals
     st.session_state.all_ticker_metrics = all_metrics
     st.session_state.last_scan_time = datetime.now().strftime("%H:%M:%S")
@@ -246,7 +322,8 @@ def run_scan():
         'st_lookback': st_lookback,
         'ignore_vol': ignore_vol,
         'rr_ratio': rr_ratio,
-        'rr_factor': rr_factor
+        'rr_factor': rr_factor,
+        'ai_enabled': ai_enabled,
     }
 
 # Handle Trigger
@@ -317,62 +394,122 @@ with tab1:
         st.info("No breakout setups found yet. Adjust thresholds or click 'Scan Now' to run a fresh scan.")
     else:
         for idx, signal in enumerate(st.session_state.scan_results):
-            symbol = signal['symbol'].replace(".NS", "")
-            direction = signal['direction']
+            symbol     = signal['symbol'].replace(".NS", "")
+            direction  = signal['direction']
             curr_price = signal['current_price']
-            vwap = signal['vwap']
-            ema_9 = signal['ema_9']
-            stop_loss = signal['stop_loss']
-            target = signal.get('target_custom', signal['target_2_0'])
-            vol_ratio = signal['volume_ratio']
-            sl_source = signal['sl_source']
-            c_type = signal['candle_type']
-            
+            vwap       = signal['vwap']
+            ema_9      = signal['ema_9']
+            stop_loss  = signal['stop_loss']
+            target     = signal.get('target_custom', signal['target_2_0'])
+            vol_ratio  = signal['volume_ratio']
+            sl_source  = signal['sl_source']
+            c_type     = signal['candle_type']
+
             card_class = "signal-card-long" if direction == "LONG" else "signal-card-short"
-            badge = "🟢 LONG BREAKOUT" if direction == "LONG" else "🔴 SHORT BREAKOUT"
+            badge      = "🟢 LONG BREAKOUT" if direction == "LONG" else "🔴 SHORT BREAKOUT"
             text_color = "#28a745" if direction == "LONG" else "#dc3545"
-            
-            # Display setup details in a premium card format
-            st.markdown(f"""
-            <div class="{card_class}">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.8rem;">
-                    <span style="font-size: 1.4rem; font-weight: bold; color: #fff;">{symbol}</span>
-                    <span style="background: rgba(255,255,255,0.15); padding: 3px 10px; border-radius: 20px; font-weight: bold; color: {text_color};">{badge}</span>
-                </div>
-                <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem;">
-                    <div>
-                        <div class="metric-label">Live Price</div>
-                        <div class="metric-value">₹{curr_price:.2f}</div>
-                    </div>
-                    <div>
-                        <div class="metric-label">Volume Breakout</div>
-                        <div class="metric-value vol-breakout">{vol_ratio:.1f}x</div>
-                    </div>
-                    <div>
-                        <div class="metric-label">Entry Range (9EMA - VWAP)</div>
-                        <div class="metric-value" style="font-size: 1.1rem; font-weight: 500;">₹{min(ema_9, vwap):.2f} - ₹{max(ema_9, vwap):.2f}</div>
-                    </div>
-                    <div>
-                        <div class="metric-label">Candle Type</div>
-                        <div class="metric-value" style="font-size: 1.1rem; font-weight: 500; color: #ffc107;">{c_type}</div>
-                    </div>
-                </div>
-                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 0.8rem;">
-                    <div>
-                        <div class="metric-label">Stop-Loss (Source: {sl_source})</div>
-                        <div class="metric-value" style="color: #dc3545;">₹{stop_loss:.2f} ({abs(curr_price-stop_loss)/curr_price*100:.2f}%)</div>
-                    </div>
-                    <div>
-                        <div class="metric-label">Breakout Target ({st.session_state.scan_params['rr_ratio'] if st.session_state.scan_params else rr_ratio})</div>
-                        <div class="metric-value" style="color: #28a745;">₹{target:.2f}</div>
-                    </div>
-                    <div>
-                        <div class="metric-label">Risk-to-Reward Setup</div>
-                        <div class="metric-value" style="font-size: 1.1rem; font-weight: 500; color: #29b6f6;">1 : {st.session_state.scan_params['rr_factor'] if st.session_state.scan_params else rr_factor} Ratio</div>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+
+            # ── AI Score badge ──────────────────────────────────────────────────
+            ai_score_data = signal.get('ai_score')
+            ai_news_data  = signal.get('ai_news')
+
+            score_badge_html = ""
+            if ai_score_data:
+                score     = ai_score_data['score']
+                grade     = ai_score_data['grade']
+                # Color the badge by grade
+                grade_colors = {'A': '#00e676', 'B': '#69f0ae', 'C': '#ffc107', 'D': '#ef5350'}
+                sc = grade_colors.get(grade, '#8a99ad')
+                score_badge_html = (
+                    f'<span style="background:rgba(0,0,0,0.35);border:1px solid {sc};'
+                    f'color:{sc};padding:3px 12px;border-radius:20px;font-weight:700;font-size:0.9rem;margin-left:8px;">'
+                    f'🤖 {score}/100 · {grade}</span>'
+                )
+
+            news_badge_html = ""
+            if ai_news_data:
+                emoji     = ai_news_data.get('emoji', '🟡')
+                sentiment = ai_news_data.get('sentiment', 'Neutral')
+                risk_flag = ai_news_data.get('risk_flag', 'None')
+                rf_str    = f" · {risk_flag}" if risk_flag and risk_flag != 'None' else ""
+                news_badge_html = (
+                    f'<span style="background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.12);'
+                    f'color:#cdd5e0;padding:3px 10px;border-radius:20px;font-size:0.85rem;margin-left:6px;">'
+                    f'{emoji} {sentiment}{rf_str}</span>'
+                )
+
+            html_content = f"""
+<div class="{card_class}">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.8rem; flex-wrap: wrap; gap: 0.4rem;">
+        <div style="display:flex;align-items:center;flex-wrap:wrap;gap:0.3rem;">
+            <span style="font-size: 1.4rem; font-weight: bold; color: #fff;">{symbol}</span>
+            {score_badge_html}
+            {news_badge_html}
+        </div>
+        <span style="background: rgba(255,255,255,0.15); padding: 3px 10px; border-radius: 20px; font-weight: bold; color: {text_color};">{badge}</span>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem;">
+        <div>
+            <div class="metric-label">Live Price</div>
+            <div class="metric-value">₹{curr_price:.2f}</div>
+        </div>
+        <div>
+            <div class="metric-label">Volume Breakout</div>
+            <div class="metric-value vol-breakout">{vol_ratio:.1f}x</div>
+        </div>
+        <div>
+            <div class="metric-label">Entry Range (9EMA – VWAP)</div>
+            <div class="metric-value" style="font-size: 1.1rem; font-weight: 500;">₹{min(ema_9, vwap):.2f} – ₹{max(ema_9, vwap):.2f}</div>
+        </div>
+        <div>
+            <div class="metric-label">Candle Type</div>
+            <div class="metric-value" style="font-size: 1.1rem; font-weight: 500; color: #ffc107;">{c_type}</div>
+        </div>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 0.8rem;">
+        <div>
+            <div class="metric-label">Stop-Loss (Source: {sl_source})</div>
+            <div class="metric-value" style="color: #dc3545;">₹{stop_loss:.2f} ({abs(curr_price-stop_loss)/curr_price*100:.2f}%)</div>
+        </div>
+        <div>
+            <div class="metric-label">Breakout Target ({st.session_state.scan_params['rr_ratio'] if st.session_state.scan_params else rr_ratio})</div>
+            <div class="metric-value" style="color: #28a745;">₹{target:.2f}</div>
+        </div>
+        <div>
+            <div class="metric-label">Risk-to-Reward Setup</div>
+            <div class="metric-value" style="font-size: 1.1rem; font-weight: 500; color: #29b6f6;">1 : {st.session_state.scan_params['rr_factor'] if st.session_state.scan_params else rr_factor} Ratio</div>
+        </div>
+    </div>
+</div>
+"""
+            st.markdown(html_content, unsafe_allow_html=True)
+
+            # ── AI Detail Expander ──────────────────────────────────────────────
+            if ai_score_data or ai_news_data:
+                with st.expander(f"🤖 AI Analysis — {symbol}", expanded=False):
+                    col_ai1, col_ai2 = st.columns(2)
+                    if ai_score_data:
+                        with col_ai1:
+                            st.markdown("**📊 Signal Confidence**")
+                            st.metric("Score", f"{ai_score_data['score']}/100", delta=f"Grade {ai_score_data['grade']}")
+                            st.markdown("**Reasoning:**")
+                            for bullet in ai_score_data.get('reasoning', '').split('|'):
+                                if bullet.strip():
+                                    st.markdown(f"• {bullet.strip()}")
+                            st.info(f"💡 {ai_score_data.get('trade_advice', '')}")
+                    if ai_news_data:
+                        with col_ai2:
+                            st.markdown("**📰 News Sentiment**")
+                            sent_emoji = ai_news_data.get('emoji', '🟡')
+                            st.markdown(f"### {sent_emoji} {ai_news_data.get('sentiment', 'Neutral')}")
+                            st.markdown(ai_news_data.get('summary', ''))
+                            if ai_news_data.get('risk_flag') and ai_news_data['risk_flag'] != 'None':
+                                st.warning(f"⚠️ Risk Flag: {ai_news_data['risk_flag']}")
+                            headlines = ai_news_data.get('headlines', [])
+                            if headlines:
+                                st.markdown("**Recent Headlines:**")
+                                for h in headlines[:5]:
+                                    st.markdown(f"› {h}")
 
 # TAB 2: Live Charts
 with tab2:

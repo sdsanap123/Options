@@ -12,27 +12,32 @@ def fetch_intraday_data(symbol: str, interval: str = "5m", period: str = "5d") -
     Fetch historical intraday data for a given symbol.
     period='5d' or '2d' ensures enough data for indicators like 20-period SMA/EMA.
     """
+    ticker_symbol = symbol
+    if not ticker_symbol.endswith('.NS') and '.' not in ticker_symbol:
+        ticker_symbol += '.NS'
+
     try:
-        # Standardize ticker for Indian market if no suffix
-        ticker_symbol = symbol
-        if not ticker_symbol.endswith('.NS') and not '.' in ticker_symbol:
-            ticker_symbol += '.NS'
-            
         ticker = yf.Ticker(ticker_symbol)
         df = ticker.history(period=period, interval=interval)
-        
-        if df.empty or len(df) < 30:
-            logger.warning(f"Insufficient or empty data returned for {ticker_symbol}")
+
+        if df.empty:
+            logger.error(f"Empty dataframe returned for {ticker_symbol}. It may be delisted, have no data for the requested period, or yfinance is rate-limited.")
             return None
             
+        if len(df) < 30:
+            logger.warning(f"Insufficient data returned for {ticker_symbol} (Rows: {len(df)}). Needed at least 30 for indicators.")
+            return None
+
         # Clean columns if multi-level index is returned
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-            
+
         return df
+
     except Exception as e:
-        logger.error(f"Error fetching data for {symbol}: {str(e)}")
+        logger.error(f"Exception encountered while fetching data for {ticker_symbol}: {e}", exc_info=True)
         return None
+
 
 def analyze_ticker(symbol: str, interval: str = "5m", period: str = "5d", st_lookback: int = 5, ignore_volume: bool = False) -> Optional[Dict]:
     """
