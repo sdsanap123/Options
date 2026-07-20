@@ -588,9 +588,10 @@ with tab2:
                 name="20-Vol SMA"
             ), row=2, col=1)
             
-            # ── Projection: Next 30 min (10 × 3-min candles) ──────────────────
-            PROJ_CANDLES   = 10          # 10 candles × 3 min = 30 min
-            CANDLE_MINS    = 3           # minutes per candle for labelling
+            # ── Projection: Next 1 Hour (60 min) ──────────────────
+            display_tf = st.session_state.scan_params['timeframe'] if st.session_state.scan_params else timeframe
+            freq_min  = int(display_tf.replace('m', ''))  # actual chart timeframe (2 or 5 min)
+            PROJ_CANDLES   = 60 // freq_min  # 12 candles for 5m, 30 candles for 2m
             EMA_K          = 2 / (9 + 1) # EMA smoothing factor
 
             # ── Price trend: linear slope from last 5 candles ──────────────────
@@ -618,8 +619,6 @@ with tab2:
 
             # ── Build future timestamps ─────────────────────────────────────────
             last_ts   = df.index[-1]
-            display_tf = st.session_state.scan_params['timeframe'] if st.session_state.scan_params else timeframe
-            freq_min  = int(display_tf.replace('m', ''))  # actual chart timeframe (2 or 5 min)
             future_ts = pd.date_range(start=last_ts, periods=PROJ_CANDLES + 1, freq=f'{freq_min}min')[1:]
 
             # ── Iterate candles and project ────────────────────────────────────
@@ -674,6 +673,7 @@ with tab2:
             x_proj = [last_ts] + list(future_ts)
             v_proj_vwap      = [float(df['VWAP'].iloc[-1])] + proj_vwap
             v_proj_ema       = [float(df['EMA_9'].iloc[-1])] + proj_ema
+            v_proj_entry     = [(v + e) / 2 for v, e in zip(v_proj_vwap, v_proj_ema)]
             v_proj_vwap_h    = [float(df['VWAP'].iloc[-1])] + proj_vwap_high
             v_proj_vwap_l    = [float(df['VWAP'].iloc[-1])] + proj_vwap_low
             v_proj_ema_h     = [float(df['EMA_9'].iloc[-1])] + proj_ema_high
@@ -731,6 +731,18 @@ with tab2:
                 hoverinfo='text'
             ), row=1, col=1)
 
+            # ── Projected Entry Price Midpoint (dashed green line) ────────────────
+            fig.add_trace(go.Scatter(
+                x=x_proj,
+                y=v_proj_entry,
+                mode='lines+markers',
+                line=dict(color='#00e676', width=2, dash='dashdot'),
+                marker=dict(size=4, color='#00e676'),
+                name='Proj Entry (Mid VWAP/EMA)',
+                text=[f"Proj Entry: ₹{v:.2f}<br>{lbl}" for v, lbl in zip(v_proj_entry, hover_labels)],
+                hoverinfo='text'
+            ), row=1, col=1)
+
             # ── Vertical separator at "now" ────────────────────────────────────
             fig.add_vline(
                 x=last_ts.timestamp() * 1000,
@@ -757,16 +769,30 @@ with tab2:
                 legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="left", x=0)
             )
 
-            fig.update_xaxes(gridcolor='rgba(255,255,255,0.05)', row=1, col=1)
+            fig.update_xaxes(
+                gridcolor='rgba(255,255,255,0.05)',
+                rangebreaks=[
+                    dict(bounds=["sat", "mon"]),  # hide weekends
+                    dict(bounds=[15.5, 9.25], pattern="hour")  # hide 3:30 PM to 9:15 AM
+                ],
+                row=1, col=1
+            )
             fig.update_yaxes(gridcolor='rgba(255,255,255,0.05)', row=1, col=1)
-            fig.update_xaxes(gridcolor='rgba(255,255,255,0.05)', row=2, col=1)
+            fig.update_xaxes(
+                gridcolor='rgba(255,255,255,0.05)',
+                rangebreaks=[
+                    dict(bounds=["sat", "mon"]),  # hide weekends
+                    dict(bounds=[15.5, 9.25], pattern="hour")  # hide 3:30 PM to 9:15 AM
+                ],
+                row=2, col=1
+            )
             fig.update_yaxes(gridcolor='rgba(255,255,255,0.05)', row=2, col=1)
 
             st.plotly_chart(fig, width='stretch')
 
             # ── Chart title (below chart to avoid overlapping legend) ──────────
             display_tf = st.session_state.scan_params['timeframe'] if st.session_state.scan_params else timeframe
-            chart_title = f"{selected_sig_symbol.replace('.NS', '')} — Intraday Setup + 30-Min Projection ({display_tf})"
+            chart_title = f"{selected_sig_symbol.replace('.NS', '')} — Intraday Setup + 1-Hour Projection ({display_tf})"
             st.markdown(
                 f'<div style="text-align:center;color:#8a99ad;font-size:0.95rem;margin-top:-0.5rem;margin-bottom:1rem;">'
                 f'📊 {chart_title}</div>',
@@ -774,13 +800,14 @@ with tab2:
             )
 
             # ── Projection data table ──────────────────────────────────────────
-            with st.expander("📋 Projection Data Table (Next 30 min)", expanded=False):
+            with st.expander("📋 Projection Data Table (Next 60 min)", expanded=False):
                 proj_df = pd.DataFrame({
                     'Time': [t.strftime('%H:%M') for t in future_ts],
                     'Candle': [f"+{i * freq_min}m" for i in range(1, PROJ_CANDLES + 1)],
                     'Proj Price (Trend)': [f"₹{last_price + price_slope * i:.2f}" for i in range(1, PROJ_CANDLES + 1)],
                     'Proj VWAP': [f"₹{v:.2f}" for v in proj_vwap],
                     'Proj 9 EMA': [f"₹{v:.2f}" for v in proj_ema],
+                    'Proj Entry Mid': [f"₹{(v + e)/2:.2f}" for v, e in zip(proj_vwap, proj_ema)],
                     'VWAP Range': [f"₹{l:.2f} – ₹{h:.2f}" for l, h in zip(proj_vwap_low, proj_vwap_high)],
                     'EMA Range':  [f"₹{l:.2f} – ₹{h:.2f}" for l, h in zip(proj_ema_low,  proj_ema_high)],
                 })

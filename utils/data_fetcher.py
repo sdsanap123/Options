@@ -32,6 +32,24 @@ def fetch_intraday_data(symbol: str, interval: str = "5m", period: str = "5d") -
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
+        # Convert index to Asia/Kolkata timezone
+        if df.index.tz is None:
+            df.index = df.index.tz_localize('UTC').tz_convert('Asia/Kolkata')
+        else:
+            df.index = df.index.tz_convert('Asia/Kolkata')
+
+        # Filter out Saturday and Sunday
+        df = df[df.index.dayofweek < 5]
+
+        # Filter for market hours (09:15 to 15:30)
+        start_time = pd.Timestamp("09:15").time()
+        end_time = pd.Timestamp("15:30").time()
+        df = df[(df.index.time >= start_time) & (df.index.time <= end_time)]
+
+        if len(df) < 30:
+            logger.warning(f"Insufficient data returned for {ticker_symbol} (Rows: {len(df)}). Needed at least 30 for indicators.")
+            return None
+
         return df
 
     except Exception as e:
@@ -76,13 +94,13 @@ def analyze_ticker(symbol: str, interval: str = "5m", period: str = "5d", st_loo
             st_line = float(row['ST_Line'])
             st_dir = int(row['ST_Direction'])
             
-            # 1. Volume filter: Current volume > 2 * Volume_SMA20 (or custom multiplier)
+            # 1. Volume filter: Current volume > 2.5 * Volume_SMA20 (or custom multiplier)
             # Default to True if ignore_volume is checked
-            vol_condition = ignore_volume or (volume > (2.0 * vol_sma) if vol_sma > 0 else False)
+            vol_condition = ignore_volume or (volume > (2.5 * vol_sma) if vol_sma > 0 else False)
             
-            # 2. VWAP filter: Close > VWAP for Long, Close < VWAP for Short
-            above_vwap = close > vwap
-            below_vwap = close < vwap
+            # 2. VWAP filter: Close > VWAP for Long, Close < VWAP for Short (with 0.2% margin of safety)
+            above_vwap = close > (vwap * 1.002)
+            below_vwap = close < (vwap * 0.998)
             
             # 3. Supertrend filter: Check if flipped green (long) or red (short)
             # If st_lookback == 0, we just check if it's currently in that direction (active trend)
@@ -128,13 +146,13 @@ def analyze_ticker(symbol: str, interval: str = "5m", period: str = "5d", st_loo
                     risk = min_risk
                     stop_loss = close - min_risk if direction == "LONG" else close + min_risk
                 
-                # Targets: 1:1.5 to 1:2 Risk-to-Reward ratio
+                # Targets: 1:2 to 1:3 Risk-to-Reward ratio (Bigger margin of win)
                 if direction == "LONG":
-                    target_1_5 = close + (1.5 * risk)
-                    target_2_0 = close + (2.0 * risk)
+                    target_1_5 = close + (2.0 * risk)
+                    target_2_0 = close + (3.0 * risk)
                 else: # SHORT
-                    target_1_5 = close - (1.5 * risk)
-                    target_2_0 = close - (2.0 * risk)
+                    target_1_5 = close - (2.0 * risk)
+                    target_2_0 = close - (3.0 * risk)
                     
                 return {
                     'symbol': symbol,
