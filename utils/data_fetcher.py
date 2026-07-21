@@ -2,6 +2,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import logging
+import requests
 from typing import Dict, Optional, List, Tuple
 from utils.indicators import calculate_ema, calculate_vwap, calculate_supertrend
 
@@ -57,14 +58,126 @@ def fetch_intraday_data(symbol: str, interval: str = "5m", period: str = "5d") -
         return None
 
 
-def analyze_ticker(symbol: str, interval: str = "5m", period: str = "5d", st_lookback: int = 5, ignore_volume: bool = False) -> Optional[Dict]:
+def fetch_batch_intraday_data(tickers: List[str], interval: str = "5m", period: str = "5d") -> Tuple[Dict[str, pd.DataFrame], Optional[str]]:
+    """
+    Fetch historical intraday data for a batch of tickers using yf.download.
+    Returns a tuple of (dictionary mapping ticker symbol to DataFrame, error_message).
+    """
+    if not tickers:
+        return {}, "No tickers specified."
+
+    # Standardize tickers to have .NS suffix if needed
+    standardized_tickers = []
+    ticker_map = {}  # Maps standardized back to original input symbol
+    for t in tickers:
+        std_t = t
+        if not std_t.endswith('.NS') and '.' not in std_t:
+            std_t += '.NS'
+        standardized_tickers.append(std_t)
+        ticker_map[std_t] = t
+
+    try:
+        logger.info(f"Downloading batch intraday data for {len(standardized_tickers)} tickers...")
+        # Use yf.download to get all tickers in one request
+        combined_df = yf.download(
+            tickers=standardized_tickers,
+            period=period,
+            interval=interval,
+            group_by='ticker',
+            threads=True,
+            progress=False
+        )
+
+        result_dfs = {}
+
+        if combined_df.empty:
+            logger.error("Empty batch dataframe returned from yf.download. Checking connectivity...")
+            # Try to hit a basic Yahoo Finance endpoint to diagnose the exact issue
+            try:
+                test_url = "https://query2.finance.yahoo.com/v8/finance/chart/RELIANCE.NS?period1=1&period2=2&interval=1d"
+                headers = {"User-Agent": "Mozilla/5.0"}
+                r = requests.get(test_url, headers=headers, timeout=5)
+                if r.status_code == 429:
+                    return {}, "Rate Limited (HTTP 429) by Yahoo Finance. Please wait before scanning again."
+                elif r.status_code == 403:
+                    return {}, "IP Blocked/Forbidden (HTTP 403) by Yahoo Finance."
+                elif r.status_code != 200:
+                    return {}, f"Yahoo Finance API returned HTTP error: {r.status_code}."
+            except Exception as net_err:
+                return {}, f"Network Connectivity Issue: Could not reach Yahoo Finance ({str(net_err)})"
+            return {}, "Yahoo Finance returned no data (Possible tickers error or closed market)."
+
+        is_multi = isinstance(combined_df.columns, pd.MultiIndex)
+
+        # Process each ticker's data
+        for std_t in standardized_tickers:
+            if is_multi:
+                if std_t not in combined_df.columns.levels[0]:
+                    logger.warning(f"No data returned for ticker {std_t} in batch download.")
+                    continue
+                df = combined_df[std_t].dropna(how='all')
+            else:
+                # Fallback if single ticker download returned flat columns
+                df = combined_df.dropna(how='all')
+
+            if df.empty:
+                continue
+
+            # Convert index to Asia/Kolkata timezone
+            if df.index.tz is None:
+                df.index = df.index.tz_localize('UTC').tz_convert('Asia/Kolkata')
+            else:
+                df.index = df.index.tz_convert('Asia/Kolkata')
+
+            # Filter out Saturday and Sunday
+            df = df[df.index.dayofweek < 5]
+
+            # Filter for market hours (09:15 to 15:30)
+            start_time = pd.Timestamp("09:15").time()
+            end_time = pd.Timestamp("15:30").time()
+            df = df[(df.index.time >= start_time) & (df.index.time <= end_time)]
+
+            if len(df) < 30:
+                logger.warning(f"Insufficient data returned for {std_t} in batch (Rows: {len(df)}). Needed at least 30.")
+                continue
+
+            orig_t = ticker_map[std_t]
+            result_dfs[orig_t] = df
+
+        logger.info(f"Successfully processed {len(result_dfs)} out of {len(tickers)} tickers in batch download.")
+
+        if not result_dfs:
+            return {}, "No tickers had sufficient data (Need at least 30 candles within market hours)."
+
+        return result_dfs, None
+
+    except Exception as e:
+        error_str = str(e)
+        logger.error(f"Exception during batch fetch: {error_str}", exc_info=True)
+
+        # Check for common network error signatures
+        if any(term in error_str for term in ["Connection", "Max retries", "NameResolutionError", "getaddrinfo"]):
+            return {}, "Network Connectivity Issue: Could not connect to Yahoo Finance. Check your internet connection."
+        elif "429" in error_str:
+            return {}, "Rate Limited (HTTP 429) by Yahoo Finance. Please wait before scanning again."
+        elif "403" in error_str:
+            return {}, "IP Blocked/Forbidden (HTTP 403) by Yahoo Finance."
+        else:
+            return {}, f"Download Failed: {error_str}"
+
+
+def analyze_ticker(symbol: str, interval: str = "5m", period: str = "5d", st_lookback: int = 5, ignore_volume: bool = False, pre_fetched_df: Optional[pd.DataFrame] = None) -> Optional[Dict]:
     """
     Analyze a ticker for intraday breakout setup:
     1. Volume breakout: Vol > 2x the 20-period Average Volume (unless ignore_volume is True).
     2. Close relation to VWAP.
     3. Supertrend (7, 3) crossover (flipped green for long, red for short) within the st_lookback window.
     """
-    df = fetch_intraday_data(symbol, interval=interval, period=period)
+    if pre_fetched_df is not None:
+        df = pre_fetched_df.copy()
+    else:
+        df = fetch_intraday_data(symbol, interval=interval, period=period)
+
     if df is None or len(df) < 25:
         return None
         

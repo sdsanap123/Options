@@ -12,7 +12,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from utils.tickers import ALL_CATEGORIES
-from utils.data_fetcher import analyze_ticker
+from utils.data_fetcher import analyze_ticker, fetch_batch_intraday_data
 from utils.stock_utils import load_equity_data
 from utils.ai_analyzer import score_signal, get_news_sentiment
 
@@ -229,13 +229,32 @@ def run_scan():
     all_metrics = []
     total = len(tickers)
 
-    my_bar = st.progress(0, text="Scanning tickers...")
+    my_bar = st.progress(0, text="Fetching batch data from yfinance...")
+    
+    # Batch fetch all tickers at once
+    batch_data, err_msg = fetch_batch_intraday_data(tickers, interval=timeframe, period="5d")
+
+    if err_msg:
+        my_bar.progress(0, text=f"❌ Error: {err_msg}")
+        st.error(f"Data Fetching Failed: {err_msg}")
+        st.session_state.running = False
+        return
 
     for idx, ticker in enumerate(tickers):
         symbol_name = ticker.replace(".NS", "")
-        my_bar.progress((idx + 1) / total, text=f"Analyzing {symbol_name} ({idx+1}/{total})")
+        # Scale progress between 10% and 100%
+        progress_val = 0.1 + 0.9 * ((idx + 1) / total)
+        my_bar.progress(progress_val, text=f"Analyzing {symbol_name} ({idx+1}/{total})")
 
-        res = analyze_ticker(ticker, interval=timeframe, period="5d", st_lookback=st_lookback, ignore_volume=ignore_vol)
+        pre_fetched = batch_data.get(ticker)
+        res = analyze_ticker(
+            ticker, 
+            interval=timeframe, 
+            period="5d", 
+            st_lookback=st_lookback, 
+            ignore_volume=ignore_vol,
+            pre_fetched_df=pre_fetched
+        )
 
         if res:
             if res['setup_triggered']:
@@ -438,50 +457,46 @@ with tab1:
                     f'{emoji} {sentiment}{rf_str}</span>'
                 )
 
-            html_content = f"""
-<div class="{card_class}">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.8rem; flex-wrap: wrap; gap: 0.4rem;">
-        <div style="display:flex;align-items:center;flex-wrap:wrap;gap:0.3rem;">
-            <span style="font-size: 1.4rem; font-weight: bold; color: #fff;">{symbol}</span>
-            {score_badge_html}
-            {news_badge_html}
-        </div>
-        <span style="background: rgba(255,255,255,0.15); padding: 3px 10px; border-radius: 20px; font-weight: bold; color: {text_color};">{badge}</span>
-    </div>
-    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem;">
-        <div>
-            <div class="metric-label">Live Price</div>
-            <div class="metric-value">₹{curr_price:.2f}</div>
-        </div>
-        <div>
-            <div class="metric-label">Volume Breakout</div>
-            <div class="metric-value vol-breakout">{vol_ratio:.1f}x</div>
-        </div>
-        <div>
-            <div class="metric-label">Entry Range (9EMA – VWAP)</div>
-            <div class="metric-value" style="font-size: 1.1rem; font-weight: 500;">₹{min(ema_9, vwap):.2f} – ₹{max(ema_9, vwap):.2f}</div>
-        </div>
-        <div>
-            <div class="metric-label">Candle Type</div>
-            <div class="metric-value" style="font-size: 1.1rem; font-weight: 500; color: #ffc107;">{c_type}</div>
-        </div>
-    </div>
-    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 0.8rem;">
-        <div>
-            <div class="metric-label">Stop-Loss (Source: {sl_source})</div>
-            <div class="metric-value" style="color: #dc3545;">₹{stop_loss:.2f} ({abs(curr_price-stop_loss)/curr_price*100:.2f}%)</div>
-        </div>
-        <div>
-            <div class="metric-label">Breakout Target ({st.session_state.scan_params['rr_ratio'] if st.session_state.scan_params else rr_ratio})</div>
-            <div class="metric-value" style="color: #28a745;">₹{target:.2f}</div>
-        </div>
-        <div>
-            <div class="metric-label">Risk-to-Reward Setup</div>
-            <div class="metric-value" style="font-size: 1.1rem; font-weight: 500; color: #29b6f6;">1 : {st.session_state.scan_params['rr_factor'] if st.session_state.scan_params else rr_factor} Ratio</div>
-        </div>
-    </div>
+            html_content = f"""<div class="{card_class}">
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.8rem; flex-wrap: wrap; gap: 0.4rem;">
+<div style="display:flex;align-items:center;flex-wrap:wrap;gap:0.3rem;">
+<span style="font-size: 1.4rem; font-weight: bold; color: #fff;">{symbol}</span>{score_badge_html}{news_badge_html}
 </div>
-"""
+<span style="background: rgba(255,255,255,0.15); padding: 3px 10px; border-radius: 20px; font-weight: bold; color: {text_color};">{badge}</span>
+</div>
+<div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem;">
+<div>
+<div class="metric-label">Live Price</div>
+<div class="metric-value">₹{curr_price:.2f}</div>
+</div>
+<div>
+<div class="metric-label">Volume Breakout</div>
+<div class="metric-value vol-breakout">{vol_ratio:.1f}x</div>
+</div>
+<div>
+<div class="metric-label">Entry Range (9EMA – VWAP)</div>
+<div class="metric-value" style="font-size: 1.1rem; font-weight: 500;">₹{min(ema_9, vwap):.2f} – ₹{max(ema_9, vwap):.2f}</div>
+</div>
+<div>
+<div class="metric-label">Candle Type</div>
+<div class="metric-value" style="font-size: 1.1rem; font-weight: 500; color: #ffc107;">{c_type}</div>
+</div>
+</div>
+<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 0.8rem;">
+<div>
+<div class="metric-label">Stop-Loss (Source: {sl_source})</div>
+<div class="metric-value" style="color: #dc3545;">₹{stop_loss:.2f} ({abs(curr_price-stop_loss)/curr_price*100:.2f}%)</div>
+</div>
+<div>
+<div class="metric-label">Breakout Target ({st.session_state.scan_params['rr_ratio'] if st.session_state.scan_params else rr_ratio})</div>
+<div class="metric-value" style="color: #28a745;">₹{target:.2f}</div>
+</div>
+<div>
+<div class="metric-label">Risk-to-Reward Setup</div>
+<div class="metric-value" style="font-size: 1.1rem; font-weight: 500; color: #29b6f6;">1 : {st.session_state.scan_params['rr_factor'] if st.session_state.scan_params else rr_factor} Ratio</div>
+</div>
+</div>
+</div>"""
             st.markdown(html_content, unsafe_allow_html=True)
 
             # ── AI Detail Expander ──────────────────────────────────────────────
