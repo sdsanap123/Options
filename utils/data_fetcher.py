@@ -166,12 +166,23 @@ def fetch_batch_intraday_data(tickers: List[str], interval: str = "5m", period: 
             return {}, f"Download Failed: {error_str}"
 
 
-def analyze_ticker(symbol: str, interval: str = "5m", period: str = "5d", st_lookback: int = 5, ignore_volume: bool = False, pre_fetched_df: Optional[pd.DataFrame] = None) -> Optional[Dict]:
+def analyze_ticker(
+    symbol: str, 
+    interval: str = "5m", 
+    period: str = "5d", 
+    st_lookback: int = 0, 
+    ignore_volume: bool = False, 
+    pre_fetched_df: Optional[pd.DataFrame] = None,
+    st_period: int = 10,
+    st_multiplier: float = 1.2,
+    min_vol_ratio: float = 1.5
+) -> Optional[Dict]:
     """
-    Analyze a ticker for intraday breakout setup:
-    1. Volume breakout: Vol > 2x the 20-period Average Volume (unless ignore_volume is True).
-    2. Close relation to VWAP.
-    3. Supertrend (7, 3) crossover (flipped green for long, red for short) within the st_lookback window.
+    Anticipation + Early Trigger Evaluation Engine:
+    1. Background Trend State: Supertrend (10, 1.2) direction (1 for Long, -1 for Short).
+    2. Proximity to Value: Price above VWAP (Long) or below VWAP (Short) and within 0.1% distance of VWAP or 9 EMA.
+    3. Micro-Breakout: Live Close > prev candle High (Long) or Live Close < prev candle Low (Short).
+    4. Time-Weighted Projected Volume on Live Candle: Projected Vol > 1.5x Volume SMA 20.
     """
     if pre_fetched_df is not None:
         df = pre_fetched_df.copy()
@@ -186,13 +197,17 @@ def analyze_ticker(symbol: str, interval: str = "5m", period: str = "5d", st_loo
         df['EMA_9'] = calculate_ema(df, period=9)
         df['VWAP'] = calculate_vwap(df)
         
-        st_df = calculate_supertrend(df, period=7, multiplier=3.0)
+        st_df = calculate_supertrend(df, period=st_period, multiplier=st_multiplier)
         df = pd.concat([df, st_df], axis=1)
         
         # Volume SMA 20
         df['Vol_SMA20'] = df['Volume'].rolling(window=20).mean()
         
-        # Check the last two candles (current live and previous closed)
+        # Determine timeframe interval in seconds for time-weighted live volume projection
+        tf_minutes = int(interval.replace('m', '')) if 'm' in interval else 5
+        tf_seconds = tf_minutes * 60.0
+
+        # Check candles (live candle offset=-1 evaluated first, then closed offset=-2)
         for offset in [-1, -2]:
             if abs(offset) > len(df):
                 continue
@@ -201,71 +216,83 @@ def analyze_ticker(symbol: str, interval: str = "5m", period: str = "5d", st_loo
             
             close = float(row['Close'])
             volume = float(row['Volume'])
-            vol_sma = float(row['Vol_SMA20'])
+            vol_sma = float(row['Vol_SMA20']) if 'Vol_SMA20' in row and row['Vol_SMA20'] > 0 else 0
             vwap = float(row['VWAP'])
             ema_9 = float(row['EMA_9'])
             st_line = float(row['ST_Line'])
             st_dir = int(row['ST_Direction'])
             
-            # 1. Volume filter: Current volume > 2.5 * Volume_SMA20 (or custom multiplier)
-            # Default to True if ignore_volume is checked
-            vol_condition = ignore_volume or (volume > (2.5 * vol_sma) if vol_sma > 0 else False)
-            
-            # 2. VWAP filter: Close > VWAP for Long, Close < VWAP for Short (with 0.2% margin of safety)
-            above_vwap = close > (vwap * 1.002)
-            below_vwap = close < (vwap * 0.998)
-            
-            # 3. Supertrend filter: Check if flipped green (long) or red (short)
-            # If st_lookback == 0, we just check if it's currently in that direction (active trend)
-            if st_lookback == 0:
-                flipped_green = st_dir == 1
-                flipped_red = st_dir == -1
+            # Time-Weighted Projected Volume Calculation on Live Candle
+            if offset == -1 and vol_sma > 0:
+                try:
+                    candle_ts = df.index[-1]
+                    now_ts = pd.Timestamp.now(tz=candle_ts.tz) if candle_ts.tz is not None else pd.Timestamp.now()
+                    elapsed_sec = (now_ts - candle_ts).total_seconds()
+                    # Bound elapsed seconds between 10s and tf_seconds
+                    elapsed_sec = max(10.0, min(tf_seconds, elapsed_sec))
+                    projected_volume = (volume / elapsed_sec) * tf_seconds
+                    effective_vol_ratio = projected_volume / vol_sma
+                except Exception:
+                    effective_vol_ratio = volume / vol_sma if vol_sma > 0 else 0
             else:
-                # We check if there was a trigger in the lookback window
-                # [offset - st_lookback, offset]
-                start_idx = len(df) + offset - st_lookback
-                end_idx = len(df) + offset + 1 # inclusive of current offset
-                if start_idx < 0:
-                    start_idx = 0
-                
+                effective_vol_ratio = volume / vol_sma if vol_sma > 0 else 0
+
+            # 1. Volume Velocity Condition
+            vol_condition = ignore_volume or (effective_vol_ratio > min_vol_ratio)
+            
+            # 2. Background Trend State Filter (Supertrend 10, 1.2)
+            state_long = st_dir == 1
+            state_short = st_dir == -1
+            
+            if st_lookback > 0:
+                start_idx = max(0, len(df) + offset - st_lookback)
+                end_idx = len(df) + offset + 1
                 trigger_window = df.iloc[start_idx:end_idx]
-                flipped_green = trigger_window['ST_Buy_Trigger'].any()
-                flipped_red = trigger_window['ST_Sell_Trigger'].any()
-                
-            # Long Setup
-            is_long_setup = vol_condition and above_vwap and flipped_green
-            # Short Setup
-            is_short_setup = vol_condition and below_vwap and flipped_red
+                state_long = state_long and trigger_window['ST_Buy_Trigger'].any()
+                state_short = state_short and trigger_window['ST_Sell_Trigger'].any()
+
+            # 3. Proximity to Value Filter (within 0.1% distance of VWAP or 9 EMA)
+            # Long: Close > VWAP and within 0.1% of VWAP or 9 EMA
+            vwap_dist_long = (close - vwap) / vwap
+            ema_dist = abs(close - ema_9) / ema_9
+            prox_long = (close > vwap) and (vwap_dist_long <= 0.001 or ema_dist <= 0.001)
+
+            # Short: Close < VWAP and within 0.1% of VWAP or 9 EMA
+            vwap_dist_short = (vwap - close) / vwap
+            prox_short = (close < vwap) and (vwap_dist_short <= 0.001 or ema_dist <= 0.001)
+
+            # 4. Micro-Breakout Filter (vs previous closed candle offset -2)
+            prev_row = df.iloc[offset - 1] if len(df) >= abs(offset - 1) else row
+            prev_high = float(prev_row['High'])
+            prev_low = float(prev_row['Low'])
+
+            micro_breakout_long = close > prev_high
+            micro_breakout_short = close < prev_low
+
+            is_long_setup = vol_condition and state_long and prox_long and micro_breakout_long
+            is_short_setup = vol_condition and state_short and prox_short and micro_breakout_short
             
             if is_long_setup or is_short_setup:
                 direction = "LONG" if is_long_setup else "SHORT"
                 
-                # Entry range: between 9 EMA and VWAP
-                # Calculate stop loss: 9 EMA or Supertrend line (whichever is closer to current price)
-                st_dist = abs(close - st_line)
-                ema_dist = abs(close - ema_9)
-                
-                if ema_dist < st_dist:
-                    stop_loss = ema_9
-                    sl_source = "9 EMA"
-                else:
-                    stop_loss = st_line
-                    sl_source = "Supertrend"
-                    
-                # Risk calculation
-                risk = abs(close - stop_loss)
-                min_risk = close * 0.0005
-                if risk < min_risk:
-                    risk = min_risk
-                    stop_loss = close - min_risk if direction == "LONG" else close + min_risk
-                
-                # Targets: 1:2 to 1:3 Risk-to-Reward ratio (Bigger margin of win)
+                # Stop Loss Placement & Risk Floor (0.05%)
                 if direction == "LONG":
-                    target_1_5 = close + (2.0 * risk)
-                    target_2_0 = close + (3.0 * risk)
-                else: # SHORT
-                    target_1_5 = close - (2.0 * risk)
-                    target_2_0 = close - (3.0 * risk)
+                    sl_raw = min(ema_9, vwap)
+                else:
+                    sl_raw = max(ema_9, vwap)
+                    
+                risk = max(abs(close - sl_raw), close * 0.0005)
+                
+                if direction == "LONG":
+                    stop_loss = close - risk
+                    target_1_5 = close + (1.5 * risk)
+                    target_2_0 = close + (2.0 * risk)
+                    sl_source = "min(9 EMA, VWAP)"
+                else:
+                    stop_loss = close + risk
+                    target_1_5 = close - (1.5 * risk)
+                    target_2_0 = close - (2.0 * risk)
+                    sl_source = "max(9 EMA, VWAP)"
                     
                 return {
                     'symbol': symbol,
@@ -277,14 +304,14 @@ def analyze_ticker(symbol: str, interval: str = "5m", period: str = "5d", st_loo
                     'supertrend': st_line,
                     'volume': volume,
                     'vol_sma20': vol_sma,
-                    'volume_ratio': volume / vol_sma if vol_sma > 0 else 0,
+                    'volume_ratio': effective_vol_ratio,
                     'stop_loss': stop_loss,
                     'sl_source': sl_source,
                     'target_1_5': target_1_5,
                     'target_2_0': target_2_0,
                     'risk': risk,
-                    'df': df.tail(50), # Keep tail for plotting
-                    'candle_type': 'Live/Incomplete' if offset == -1 else 'Closed',
+                    'df': df.tail(50),
+                    'candle_type': 'Live Candle (-1)' if offset == -1 else 'Closed Candle (-2)',
                     'setup_triggered': True
                 }
                 
@@ -292,7 +319,7 @@ def analyze_ticker(symbol: str, interval: str = "5m", period: str = "5d", st_loo
         row = df.iloc[-1]
         close = float(row['Close'])
         volume = float(row['Volume'])
-        vol_sma = float(row['Vol_SMA20']) if 'Vol_SMA20' in row else 0
+        vol_sma = float(row['Vol_SMA20']) if 'Vol_SMA20' in row and row['Vol_SMA20'] > 0 else 0
         vwap = float(row['VWAP']) if 'VWAP' in row else close
         ema_9 = float(row['EMA_9']) if 'EMA_9' in row else close
         st_line = float(row['ST_Line']) if 'ST_Line' in row else close

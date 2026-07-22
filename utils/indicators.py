@@ -35,7 +35,7 @@ def calculate_vwap(df: pd.DataFrame) -> pd.Series:
     vwap = vwap.ffill().bfill()
     return vwap
 
-def calculate_supertrend(df: pd.DataFrame, period: int = 7, multiplier: float = 3.0) -> pd.DataFrame:
+def calculate_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 1.2) -> pd.DataFrame:
     """
     Calculate Supertrend (period, multiplier).
     Returns a DataFrame with columns:
