@@ -358,206 +358,102 @@ if scan_clicked or (auto_refresh and not st.session_state.running):
 
 # ── Reusable Breakout Chart Renderer ──────────────────────────────────────────
 def render_breakout_chart(sig_data: dict):
-    """Renders a full interactive Plotly breakout chart + 1-hour projection for a signal."""
+    """Renders a clean interactive Plotly chart with candlesticks, VWAP, and VWAP ±0.3% bands."""
     df = sig_data['df']
     symbol = sig_data['symbol'].replace('.NS', '')
 
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.08,
-        row_width=[0.2, 0.8]
-    )
+    fig = go.Figure()
 
     # Candlesticks
     fig.add_trace(go.Candlestick(
         x=df.index,
         open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
         name="Price"
-    ), row=1, col=1)
+    ))
 
-    # VWAP (orange)
+    # VWAP (solid orange)
     fig.add_trace(go.Scatter(
         x=df.index, y=df['VWAP'],
-        line=dict(color='#ff9800', width=2), name="VWAP"
-    ), row=1, col=1)
+        line=dict(color='#ff9800', width=2),
+        name="VWAP",
+        text=[f"VWAP: ₹{v:.2f}" for v in df['VWAP']],
+        hoverinfo='text'
+    ))
 
-    # 9 EMA (blue dashed)
+    # VWAP +0.1% band (upper - cyan)
+    vwap_upper_01 = df['VWAP'] * 1.001
     fig.add_trace(go.Scatter(
-        x=df.index, y=df['EMA_9'],
-        line=dict(color='#2196f3', width=1.5, dash='dash'), name="9 EMA"
-    ), row=1, col=1)
+        x=df.index, y=vwap_upper_01,
+        line=dict(color='#00e5ff', width=1.2, dash='dash'),
+        opacity=0.75,
+        name="VWAP +0.1%",
+        text=[f"VWAP +0.1%: ₹{v:.2f}" for v in vwap_upper_01],
+        hoverinfo='text'
+    ))
 
-    # Supertrend line
+    # VWAP -0.1% band (lower - cyan)
+    vwap_lower_01 = df['VWAP'] * 0.999
     fig.add_trace(go.Scatter(
-        x=df.index, y=df['ST_Line'],
-        line=dict(color='#4caf50', width=1.5), name="Supertrend"
-    ), row=1, col=1)
+        x=df.index, y=vwap_lower_01,
+        line=dict(color='#00e5ff', width=1.2, dash='dash'),
+        opacity=0.75,
+        name="VWAP -0.1%",
+        text=[f"VWAP -0.1%: ₹{v:.2f}" for v in vwap_lower_01],
+        hoverinfo='text'
+    ))
 
-    # Volume bars
-    fig.add_trace(go.Bar(
-        x=df.index, y=df['Volume'],
-        marker_color=np.where(df['Close'] >= df['Open'], '#28a745', '#dc3545'),
-        name="Volume"
-    ), row=2, col=1)
-
-    # Volume SMA 20
+    # VWAP +0.3% band (upper - orange dot)
+    vwap_upper = df['VWAP'] * 1.003
     fig.add_trace(go.Scatter(
-        x=df.index, y=df['Vol_SMA20'],
-        line=dict(color='#ffc107', width=1.5), name="20-Vol SMA"
-    ), row=2, col=1)
+        x=df.index, y=vwap_upper,
+        line=dict(color='#ff9800', width=1, dash='dot'),
+        opacity=0.55,
+        name="VWAP +0.3%",
+        text=[f"VWAP +0.3%: ₹{v:.2f}" for v in vwap_upper],
+        hoverinfo='text'
+    ))
 
-    # ── 1-Hour Projection ──────────────────────────────────────────────────────
-    display_tf = st.session_state.scan_params['timeframe'] if st.session_state.scan_params else timeframe
-    freq_min = int(display_tf.replace('m', ''))
-    PROJ_CANDLES = 60 // freq_min
-    EMA_K = 2 / (9 + 1)
-
-    price_tail = df['Close'].tail(5).values
-    price_slope = np.polyfit(range(len(price_tail)), price_tail, 1)[0]
-    raw_atr = (df['High'] - df['Low']).tail(14).mean()
-
-    today = df.index[-1].date() if hasattr(df.index[-1], 'date') else None
-    if today is not None:
-        today_mask = pd.Series(df.index).apply(lambda x: x.date() == today if hasattr(x, 'date') else True).values
-        df_today = df[today_mask]
-    else:
-        df_today = df
-
-    cum_vol = float(df_today['Volume'].sum())
-    cum_tpv = float(df['VWAP'].iloc[-1]) * cum_vol
-    avg_vol = float(df_today['Volume'].tail(10).mean()) if len(df_today) >= 10 else float(df_today['Volume'].mean())
-
-    last_ts = df.index[-1]
-    future_ts = pd.date_range(start=last_ts, periods=PROJ_CANDLES + 1, freq=f'{freq_min}min')[1:]
-
-    proj_vwap, proj_ema = [], []
-    proj_vwap_high, proj_vwap_low = [], []
-    proj_ema_high, proj_ema_low = [], []
-    last_ema = float(df['EMA_9'].iloc[-1])
-    last_price = float(df['Close'].iloc[-1])
-    cum_vol_h, cum_tpv_h = cum_vol, cum_tpv
-    cum_vol_l, cum_tpv_l = cum_vol, cum_tpv
-    prev_ema_h = prev_ema_l = last_ema
-
-    for i in range(1, PROJ_CANDLES + 1):
-        proj_price = last_price + price_slope * i
-        cum_tpv += proj_price * avg_vol
-        cum_vol += avg_vol
-        v = cum_tpv / cum_vol if cum_vol > 0 else proj_price
-        proj_vwap.append(round(v, 2))
-        ema_c = proj_price * EMA_K + (proj_ema[-1] if proj_ema else last_ema) * (1 - EMA_K)
-        proj_ema.append(round(ema_c, 2))
-
-        p_h = proj_price + 0.5 * raw_atr
-        cum_tpv_h += p_h * avg_vol; cum_vol_h += avg_vol
-        v_h = cum_tpv_h / cum_vol_h if cum_vol_h > 0 else p_h
-        proj_vwap_high.append(round(v_h, 2))
-        ema_h = p_h * EMA_K + prev_ema_h * (1 - EMA_K)
-        proj_ema_high.append(round(ema_h, 2)); prev_ema_h = ema_h
-
-        p_l = proj_price - 0.5 * raw_atr
-        cum_tpv_l += p_l * avg_vol; cum_vol_l += avg_vol
-        v_l = cum_tpv_l / cum_vol_l if cum_vol_l > 0 else p_l
-        proj_vwap_low.append(round(v_l, 2))
-        ema_l = p_l * EMA_K + prev_ema_l * (1 - EMA_K)
-        proj_ema_low.append(round(ema_l, 2)); prev_ema_l = ema_l
-
-    x_proj = [last_ts] + list(future_ts)
-    v_proj_vwap   = [float(df['VWAP'].iloc[-1])]  + proj_vwap
-    v_proj_ema    = [float(df['EMA_9'].iloc[-1])]  + proj_ema
-    v_proj_entry  = [(v + e) / 2 for v, e in zip(v_proj_vwap, v_proj_ema)]
-    v_proj_vwap_h = [float(df['VWAP'].iloc[-1])]  + proj_vwap_high
-    v_proj_vwap_l = [float(df['VWAP'].iloc[-1])]  + proj_vwap_low
-    v_proj_ema_h  = [float(df['EMA_9'].iloc[-1])]  + proj_ema_high
-    v_proj_ema_l  = [float(df['EMA_9'].iloc[-1])]  + proj_ema_low
-    hover_labels  = [last_ts.strftime('%H:%M')] + [f"+{i * freq_min}m  {t.strftime('%H:%M')}" for i, t in enumerate(future_ts, 1)]
-
-    # VWAP band fill
-    fig.add_trace(go.Scatter(x=x_proj + x_proj[::-1], y=v_proj_vwap_h + v_proj_vwap_l[::-1],
-        fill='toself', fillcolor='rgba(255,152,0,0.08)', line=dict(width=0),
-        showlegend=False, hoverinfo='skip', name='VWAP Band'), row=1, col=1)
-    # EMA band fill
-    fig.add_trace(go.Scatter(x=x_proj + x_proj[::-1], y=v_proj_ema_h + v_proj_ema_l[::-1],
-        fill='toself', fillcolor='rgba(33,150,243,0.07)', line=dict(width=0),
-        showlegend=False, hoverinfo='skip', name='EMA Band'), row=1, col=1)
-    # Proj VWAP
-    fig.add_trace(go.Scatter(x=x_proj, y=v_proj_vwap, mode='lines+markers',
-        line=dict(color='#ff9800', width=2, dash='dot'),
-        marker=dict(size=5, symbol='circle-open', color='#ff9800'),
-        name='Proj VWAP',
-        text=[f"Proj VWAP: ₹{v:.2f}<br>{lbl}" for v, lbl in zip(v_proj_vwap, hover_labels)],
-        hoverinfo='text'), row=1, col=1)
-    # Proj 9 EMA
-    fig.add_trace(go.Scatter(x=x_proj, y=v_proj_ema, mode='lines+markers',
-        line=dict(color='#64b5f6', width=2, dash='dot'),
-        marker=dict(size=5, symbol='circle-open', color='#64b5f6'),
-        name='Proj 9 EMA',
-        text=[f"Proj EMA: ₹{v:.2f}<br>{lbl}" for v, lbl in zip(v_proj_ema, hover_labels)],
-        hoverinfo='text'), row=1, col=1)
-    # Proj entry midpoint
-    fig.add_trace(go.Scatter(x=x_proj, y=v_proj_entry, mode='lines+markers',
-        line=dict(color='#00e676', width=2, dash='dashdot'),
-        marker=dict(size=4, color='#00e676'),
-        name='Proj Entry (Mid VWAP/EMA)',
-        text=[f"Proj Entry: ₹{v:.2f}<br>{lbl}" for v, lbl in zip(v_proj_entry, hover_labels)],
-        hoverinfo='text'), row=1, col=1)
-
-    # Now vertical line
-    fig.add_vline(x=last_ts.timestamp() * 1000,
-        line=dict(color='rgba(255,255,255,0.25)', width=1.5, dash='dash'), row=1, col=1)
-    fig.add_annotation(x=last_ts, y=1, yref='paper', text='<b>Now →</b>',
-        showarrow=False, font=dict(color='rgba(255,255,255,0.5)', size=11),
-        xanchor='left', xshift=6)
+    # VWAP -0.3% band (lower - orange dot)
+    vwap_lower = df['VWAP'] * 0.997
+    fig.add_trace(go.Scatter(
+        x=df.index, y=vwap_lower,
+        line=dict(color='#ff9800', width=1, dash='dot'),
+        opacity=0.55,
+        name="VWAP -0.3%",
+        text=[f"VWAP -0.3%: ₹{v:.2f}" for v in vwap_lower],
+        hoverinfo='text'
+    ))
 
     # Layout
+    rangebreak_cfg = [
+        dict(bounds=["sat", "mon"]),
+        dict(bounds=[15.5, 9.25], pattern="hour")
+    ]
     fig.update_layout(
-        height=680,
+        height=600,
         xaxis_rangeslider_visible=False,
         paper_bgcolor='#11151c', plot_bgcolor='#11151c',
         font_color='#8a99ad',
         margin=dict(t=16, b=40, l=30, r=30),
         legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="left", x=0)
     )
-    rangebreak_cfg = [
-        dict(bounds=["sat", "mon"]),
-        dict(bounds=[15.5, 9.25], pattern="hour")
-    ]
-    fig.update_xaxes(gridcolor='rgba(255,255,255,0.05)', rangebreaks=rangebreak_cfg, row=1, col=1)
-    fig.update_xaxes(gridcolor='rgba(255,255,255,0.05)', rangebreaks=rangebreak_cfg, row=2, col=1)
-    fig.update_yaxes(gridcolor='rgba(255,255,255,0.05)', row=1, col=1)
-    fig.update_yaxes(gridcolor='rgba(255,255,255,0.05)', row=2, col=1)
+    fig.update_xaxes(gridcolor='rgba(255,255,255,0.05)', rangebreaks=rangebreak_cfg)
+    fig.update_yaxes(gridcolor='rgba(255,255,255,0.05)')
 
     st.plotly_chart(fig, width='stretch')
 
-    chart_title = f"{symbol} — Intraday Setup + 1-Hour Projection ({display_tf})"
+    display_tf = st.session_state.scan_params['timeframe'] if st.session_state.scan_params else timeframe
+    chart_title = f"{symbol} — Intraday Price + VWAP ±0.1% & ±0.3% ({display_tf})"
     st.markdown(
         f'<div style="text-align:center;color:#8a99ad;font-size:0.9rem;margin-top:-0.5rem;margin-bottom:0.8rem;">'
         f'📊 {chart_title}</div>',
         unsafe_allow_html=True
     )
 
-    # Projection data table
-    with st.expander("📋 Projection Data Table (Next 60 min)", expanded=False):
-        proj_df = pd.DataFrame({
-            'Time': [t.strftime('%H:%M') for t in future_ts],
-            'Candle': [f"+{i * freq_min}m" for i in range(1, PROJ_CANDLES + 1)],
-            'Proj Price (Trend)': [f"₹{last_price + price_slope * i:.2f}" for i in range(1, PROJ_CANDLES + 1)],
-            'Proj VWAP': [f"₹{v:.2f}" for v in proj_vwap],
-            'Proj 9 EMA': [f"₹{v:.2f}" for v in proj_ema],
-            'Proj Entry Mid': [f"₹{(v + e)/2:.2f}" for v, e in zip(proj_vwap, proj_ema)],
-            'VWAP Range': [f"₹{l:.2f} – ₹{h:.2f}" for l, h in zip(proj_vwap_low, proj_vwap_high)],
-            'EMA Range':  [f"₹{l:.2f} – ₹{h:.2f}" for l, h in zip(proj_ema_low, proj_ema_high)],
-        })
-        st.dataframe(proj_df, width='stretch', hide_index=True)
 
-    st.caption(
-        "⚠️ Projection assumes recent price trend continues. "
-        "Shaded bands show ±0.5 ATR uncertainty. "
-        "These are **statistical estimates**, not guaranteed levels — always confirm with live price action."
-    )
 
 # ── Layout Tabs ────────────────────────────────────────────────────────────────
+
 tab1, tab2 = st.tabs(["🔥 Active Signals & Charts", "📋 All Scanned Tickers"])
 
 # TAB 1: Active Signals
