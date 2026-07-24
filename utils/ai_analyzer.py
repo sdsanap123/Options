@@ -64,9 +64,12 @@ def score_signal(signal: dict) -> dict:
         ema_dist_pct   = ((close - ema_9) / ema_9 * 100) if ema_9 else 0
         st_dist_pct    = ((close - st_line) / st_line * 100) if st_line else 0
         rr_ratio       = abs(target_2_0 - close) / risk if risk > 0 else 0
-        hour_now       = datetime.now().hour
-        minute_now     = datetime.now().minute
-        time_str       = f"{hour_now:02d}:{minute_now:02d} IST"
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        ist_now = datetime.now(ist)
+        hour_now = ist_now.hour
+        minute_now = ist_now.minute
+        time_str = f"{hour_now:02d}:{minute_now:02d} IST"
         # Premium trading window: 09:20–10:30 AM IST
         in_prime_window = (9, 20) <= (hour_now, minute_now) <= (10, 30)
 

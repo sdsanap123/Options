@@ -15,6 +15,18 @@ from utils.tickers import ALL_CATEGORIES
 from utils.data_fetcher import analyze_ticker, fetch_batch_intraday_data
 from utils.stock_utils import load_equity_data
 from utils.ai_analyzer import score_signal, get_news_sentiment
+from utils.database import (
+    init_db,
+    save_recommendations_batch,
+    get_recommendations,
+    get_available_dates,
+    get_db_stats,
+    get_ist_now,
+    auto_cleanup_old_recommendations
+)
+
+# Initialize SQLite Database & Auto-cleanup (>15 days old)
+init_db()
 
 # Set Streamlit page config
 st.set_page_config(
@@ -337,7 +349,13 @@ def run_scan():
 
     st.session_state.scan_results = found_signals
     st.session_state.all_ticker_metrics = all_metrics
-    st.session_state.last_scan_time = datetime.now().strftime("%H:%M:%S")
+    st.session_state.last_scan_time = get_ist_now().strftime("%H:%M:%S IST")
+    
+    # Save breakout recommendations to database (Auto-purges >15 day old records)
+    if found_signals:
+        saved_num = save_recommendations_batch(found_signals, validity_days=15)
+        if saved_num > 0:
+            st.toast(f"💾 Saved {saved_num} new recommendation(s) to Database!", icon="💾")
     st.session_state.scan_params = {
         'timeframe': timeframe,
         'ticker_source': ticker_source,
@@ -454,7 +472,7 @@ def render_breakout_chart(sig_data: dict):
 
 # ── Layout Tabs ────────────────────────────────────────────────────────────────
 
-tab1, tab2 = st.tabs(["🔥 Active Signals & Charts", "📋 All Scanned Tickers"])
+tab1, tab2, tab3 = st.tabs(["🔥 Active Signals & Charts", "📋 All Scanned Tickers", "💾 Saved Recommendations DB"])
 
 # TAB 1: Active Signals
 with tab1:
@@ -644,6 +662,202 @@ with tab2:
             st.dataframe(df_log, width='stretch')
         else:
             st.warning("No data retrieved for scanned tickers.")
+
+# TAB 3: Saved Recommendations DB
+with tab3:
+    db_stats = get_db_stats(validity_days=15)
+    avail_dates = get_available_dates(validity_days=15)
+    active_backend = db_stats.get('backend', 'Local SQLite')
+
+    st.markdown(
+        f"### 💾 Saved Breakout Recommendations Database "
+        f"<span style='font-size:0.85rem;padding:3px 10px;border-radius:15px;background:rgba(41,182,246,0.15);border:1px solid #29b6f6;color:#29b6f6;font-weight:600;'>"
+        f"⚡ Active Backend: {active_backend}</span>",
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        "All triggered breakout recommendations are saved to the database in **IST (Asia/Kolkata)**. "
+        "Recommendations are automatically valid for **15 days** from their creation date, after which older entries are automatically purged."
+    )
+
+    with st.expander("☁️ Streamlit Cloud Persistence Guide (Supabase / Neon / PostgreSQL)", expanded=False):
+        st.markdown("""
+        **Running on Streamlit Cloud?**
+        - **Local Machine**: Automatically uses local SQLite file (`options_recommendations.db`).
+        - **Streamlit Cloud**: To make database recommendations persist permanently across app reboots/sleeps, add your free **Supabase** or **Neon PostgreSQL** credentials to your app's **Streamlit Secrets**:
+        
+        ```toml
+        # In Streamlit Cloud -> Settings -> Secrets:
+        [postgres]
+        host = "your-supabase-or-neon-db.supabase.co"
+        port = 5432
+        dbname = "postgres"
+        user = "postgres"
+        password = "your-database-password"
+        ```
+        *Or simply set `DATABASE_URL = "postgresql://user:password@host:5432/dbname"` in secrets. The app automatically detects it!*
+        """)
+
+    # Trigger auto-cleanup for >15 days old entries
+    deleted_old = auto_cleanup_old_recommendations(days=15)
+    if deleted_old > 0:
+        st.info(f"🧹 Auto-cleaned {deleted_old} expired recommendation(s) older than 15 days.")
+
+    # Summary metrics row
+    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+    with m_col1:
+        st.metric("Total Active Recommendations (≤15d)", f"{db_stats['total']}")
+    with m_col2:
+        st.metric("Long / Short Signals", f"🟢 {db_stats['long_count']} / 🔴 {db_stats['short_count']}")
+    with m_col3:
+        st.metric("Avg AI Confidence Score", f"{db_stats['avg_ai_score']}/100" if db_stats['avg_ai_score'] > 0 else "N/A")
+    with m_col4:
+        st.metric("Recorded Trading Days", f"{db_stats['distinct_dates_count']} day(s)")
+
+    st.markdown("---")
+    st.markdown("#### 🔍 Filter Recommendations by Date & Criteria")
+
+    f_col1, f_col2, f_col3, f_col4 = st.columns([2, 2, 2, 2])
+    
+    with f_col1:
+        date_preset = st.selectbox(
+            "Date Filter Preset",
+            options=["All Valid (Last 15 Days)", "Today", "Last 7 Days", "Specific Date", "Custom Date Range"],
+            index=0
+        )
+        
+    start_filter_date = None
+    end_filter_date = None
+    today_ist = get_ist_now().date()
+
+    if date_preset == "Today":
+        start_filter_date = today_ist.strftime("%Y-%m-%d")
+        end_filter_date = today_ist.strftime("%Y-%m-%d")
+    elif date_preset == "Last 7 Days":
+        start_filter_date = (today_ist - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+        end_filter_date = today_ist.strftime("%Y-%m-%d")
+    elif date_preset == "All Valid (Last 15 Days)":
+        start_filter_date = (today_ist - pd.Timedelta(days=15)).strftime("%Y-%m-%d")
+        end_filter_date = today_ist.strftime("%Y-%m-%d")
+    elif date_preset == "Specific Date":
+        if avail_dates:
+            selected_single_date = st.selectbox("Select Date (IST)", options=avail_dates)
+            start_filter_date = selected_single_date
+            end_filter_date = selected_single_date
+        else:
+            st.info("No recorded dates yet.")
+    elif date_preset == "Custom Date Range":
+        d_range = st.date_input("Date Range (IST)", value=(today_ist - pd.Timedelta(days=14), today_ist))
+        if isinstance(d_range, tuple) and len(d_range) == 2:
+            start_filter_date = d_range[0].strftime("%Y-%m-%d")
+            end_filter_date = d_range[1].strftime("%Y-%m-%d")
+        elif isinstance(d_range, tuple) and len(d_range) == 1:
+            start_filter_date = d_range[0].strftime("%Y-%m-%d")
+            end_filter_date = d_range[0].strftime("%Y-%m-%d")
+
+    with f_col2:
+        symbol_search = st.text_input("Filter Symbol", placeholder="e.g. RELIANCE").strip()
+
+    with f_col3:
+        direction_filter = st.selectbox("Direction Filter", options=["ALL", "LONG", "SHORT"])
+
+    with f_col4:
+        db_min_ai = st.slider("Min AI Score", min_value=0, max_value=100, value=0, step=5)
+
+    # Fetch recommendations from database
+    db_recs = get_recommendations(
+        start_date=start_filter_date,
+        end_date=end_filter_date,
+        symbol=symbol_search,
+        direction=direction_filter,
+        min_ai_score=db_min_ai,
+        validity_days=15
+    )
+
+    if not db_recs:
+        st.warning("No recommendations match the selected filters within the 15-day validity window.")
+    else:
+        st.success(f"Found {len(db_recs)} recommendation(s) matching your criteria.")
+
+        # Convert to DataFrame for table display
+        df_recs = pd.DataFrame(db_recs)
+        
+        # Display formatted table columns
+        display_cols = [
+            "timestamp_ist", "symbol", "direction", "current_price",
+            "stop_loss", "target", "risk", "volume_ratio",
+            "ai_score", "ai_grade", "candle_type", "days_remaining"
+        ]
+        
+        # Rename for clean UI header display
+        rename_map = {
+            "timestamp_ist": "Timestamp (IST)",
+            "symbol": "Symbol",
+            "direction": "Direction",
+            "current_price": "Price (₹)",
+            "stop_loss": "Stop Loss (₹)",
+            "target": "Target (₹)",
+            "risk": "Risk (₹)",
+            "volume_ratio": "Vol Ratio",
+            "ai_score": "AI Score",
+            "ai_grade": "AI Grade",
+            "candle_type": "Candle Type",
+            "days_remaining": "Days Remaining"
+        }
+        
+        # Present table
+        view_df = df_recs[display_cols].rename(columns=rename_map)
+        st.dataframe(view_df, width='stretch')
+
+        # CSV Export
+        csv_data = df_recs.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Export Filtered Recommendations (CSV)",
+            data=csv_data,
+            file_name=f"options_recommendations_{get_ist_now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+
+        # Recommendation Details Expander
+        st.markdown("#### 🔍 Detailed Recommendation Cards")
+        for rec in db_recs:
+            rec_id = rec['id']
+            sym = rec['symbol']
+            dir_str = rec['direction']
+            ts = rec['timestamp_ist']
+            ai_sc = rec['ai_score']
+            ai_gr = rec['ai_grade']
+            badge_color = "#28a745" if dir_str == "LONG" else "#dc3545"
+            
+            exp_label = f"📌 {sym} | {dir_str} Breakout | Price: ₹{rec['current_price']:.2f} | Time: {ts} | AI Score: {ai_sc if ai_sc else 'N/A'}"
+            with st.expander(exp_label):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.markdown(f"**Symbol:** `{sym}`")
+                    st.markdown(f"**Direction:** <span style='color:{badge_color};font-weight:bold;'>{dir_str}</span>", unsafe_allow_html=True)
+                    st.markdown(f"**Live Price:** ₹{rec['current_price']:.2f}")
+                    st.markdown(f"**Candle Type:** {rec['candle_type']}")
+                with c2:
+                    st.markdown(f"**Stop Loss:** ₹{rec['stop_loss']:.2f} ({rec['sl_source']})")
+                    st.markdown(f"**Target:** ₹{rec['target']:.2f}")
+                    st.markdown(f"**Risk:** ₹{rec['risk']:.2f}")
+                    st.markdown(f"**Volume Ratio:** {rec['volume_ratio']:.2f}x")
+                with c3:
+                    st.markdown(f"**Created Date (IST):** `{rec['created_date']}`")
+                    st.markdown(f"**Timestamp (IST):** `{ts}`")
+                    st.markdown(f"**Validity Remaining:** `{rec['days_remaining']} day(s)`")
+                    if ai_sc:
+                        st.markdown(f"**AI Score:** `{ai_sc}/100` (Grade `{ai_gr}`)")
+                        
+                if rec.get('ai_reasoning'):
+                    st.markdown("**🤖 AI Reasoning:**")
+                    for bullet in rec['ai_reasoning'].split('|'):
+                        if bullet.strip():
+                            st.markdown(f"• {bullet.strip()}")
+                if rec.get('ai_trade_advice'):
+                    st.info(f"💡 Trade Advice: {rec['ai_trade_advice']}")
+                if rec.get('news_sentiment'):
+                    st.markdown(f"**📰 News Sentiment:** {rec['news_sentiment']} — {rec.get('news_summary', '')}")
 
 # Autorefresh runner logic
 if auto_refresh:
