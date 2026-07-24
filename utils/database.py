@@ -145,7 +145,7 @@ def _query_all(query: str, params: Tuple = ()) -> List[Dict[str, Any]]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def init_db() -> None:
-    """Initialize database tables, indexes, and run 15-day auto-cleanup."""
+    """Initialize database tables, indexes, and run 7-day auto-cleanup."""
     conn, backend = _get_connection()
     try:
         cursor = conn.cursor()
@@ -213,14 +213,14 @@ def init_db() -> None:
         conn.close()
         logger.info(f"Database initialized successfully using backend: {backend.upper()}")
         
-        # Auto-cleanup entries older than 15 days on startup
-        auto_cleanup_old_recommendations(days=15)
+        # Auto-cleanup entries older than 7 days on startup
+        auto_cleanup_old_recommendations(days=7)
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}", exc_info=True)
 
-def auto_cleanup_old_recommendations(days: int = 15) -> int:
+def auto_cleanup_old_recommendations(days: int = 7) -> int:
     """
-    Automatically delete recommendations older than specified days (default 15 days) based on IST date.
+    Automatically delete recommendations older than specified days (default 7 days) based on IST date.
     Returns the count of deleted records.
     """
     deleted_count = 0
@@ -233,11 +233,11 @@ def auto_cleanup_old_recommendations(days: int = 15) -> int:
         logger.error(f"Error during auto-cleanup of recommendations: {e}", exc_info=True)
     return deleted_count
 
-def save_recommendation(signal: dict, validity_days: int = 15) -> bool:
+def save_recommendation(signal: dict, validity_days: int = 7) -> bool:
     """
     Save a single breakout recommendation signal to database.
     Prevents duplicate entries on the same day within close price proximity.
-    Automatically purges entries older than validity_days (15 days).
+    Automatically purges entries older than validity_days (7 days).
     """
     auto_cleanup_old_recommendations(days=validity_days)
     
@@ -306,7 +306,7 @@ def save_recommendation(signal: dict, validity_days: int = 15) -> bool:
         logger.error(f"Error saving recommendation for {signal.get('symbol')}: {e}", exc_info=True)
         return False
 
-def save_recommendations_batch(signals: List[dict], validity_days: int = 15) -> int:
+def save_recommendations_batch(signals: List[dict], validity_days: int = 7) -> int:
     """Save a list of recommendation signals to DB. Returns count of saved records."""
     count = 0
     for sig in signals:
@@ -321,7 +321,7 @@ def get_recommendations(
     symbol: Optional[str] = None,
     direction: Optional[str] = None,
     min_ai_score: int = 0,
-    validity_days: int = 15
+    validity_days: int = 7
 ) -> List[Dict]:
     """
     Fetch stored recommendations from database filtered as per date and criteria.
@@ -370,7 +370,7 @@ def get_recommendations(
         logger.error(f"Error fetching recommendations from database: {e}", exc_info=True)
     return results
 
-def get_available_dates(validity_days: int = 15) -> List[str]:
+def get_available_dates(validity_days: int = 7) -> List[str]:
     """Return distinct created dates present in recommendations database."""
     auto_cleanup_old_recommendations(days=validity_days)
     dates = []
@@ -381,7 +381,7 @@ def get_available_dates(validity_days: int = 15) -> List[str]:
         logger.error(f"Error fetching available dates: {e}", exc_info=True)
     return dates
 
-def get_db_stats(validity_days: int = 15) -> Dict:
+def get_db_stats(validity_days: int = 7) -> Dict:
     """Return summary statistics of recommendations stored in DB and active database backend type."""
     auto_cleanup_old_recommendations(days=validity_days)
     _, backend = _get_connection()
@@ -410,3 +410,21 @@ def get_db_stats(validity_days: int = 15) -> Dict:
     except Exception as e:
         logger.error(f"Error fetching database stats: {e}", exc_info=True)
     return stats
+
+def delete_recommendation(rec_id: int) -> bool:
+    """Delete a specific recommendation by ID from the database."""
+    try:
+        deleted_count, _ = _execute("DELETE FROM recommendations WHERE id = ?", (rec_id,))
+        return deleted_count > 0
+    except Exception as e:
+        logger.error(f"Error deleting recommendation ID {rec_id}: {e}", exc_info=True)
+        return False
+
+def clear_all_recommendations() -> int:
+    """Delete all recommendations from the database."""
+    try:
+        deleted_count, _ = _execute("DELETE FROM recommendations")
+        return deleted_count
+    except Exception as e:
+        logger.error(f"Error clearing all recommendations: {e}", exc_info=True)
+        return 0

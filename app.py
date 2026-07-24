@@ -22,7 +22,9 @@ from utils.database import (
     get_available_dates,
     get_db_stats,
     get_ist_now,
-    auto_cleanup_old_recommendations
+    auto_cleanup_old_recommendations,
+    delete_recommendation,
+    clear_all_recommendations
 )
 
 # Initialize SQLite Database & Auto-cleanup (>15 days old)
@@ -351,9 +353,9 @@ def run_scan():
     st.session_state.all_ticker_metrics = all_metrics
     st.session_state.last_scan_time = get_ist_now().strftime("%H:%M:%S IST")
     
-    # Save breakout recommendations to database (Auto-purges >15 day old records)
+    # Save breakout recommendations to database (Auto-purges >7 day old records)
     if found_signals:
-        saved_num = save_recommendations_batch(found_signals, validity_days=15)
+        saved_num = save_recommendations_batch(found_signals, validity_days=7)
         if saved_num > 0:
             st.toast(f"💾 Saved {saved_num} new recommendation(s) to Database!", icon="💾")
     st.session_state.scan_params = {
@@ -665,8 +667,8 @@ with tab2:
 
 # TAB 3: Saved Recommendations DB
 with tab3:
-    db_stats = get_db_stats(validity_days=15)
-    avail_dates = get_available_dates(validity_days=15)
+    db_stats = get_db_stats(validity_days=7)
+    avail_dates = get_available_dates(validity_days=7)
     active_backend = db_stats.get('backend', 'Local SQLite')
 
     st.markdown(
@@ -677,7 +679,7 @@ with tab3:
     )
     st.markdown(
         "All triggered breakout recommendations are saved to the database in **IST (Asia/Kolkata)**. "
-        "Recommendations are automatically valid for **15 days** from their creation date, after which older entries are automatically purged."
+        "Recommendations are automatically valid for **7 days** from their creation date, after which older entries are automatically purged."
     )
 
     with st.expander("☁️ Streamlit Cloud Persistence Guide (Supabase / Neon / PostgreSQL)", expanded=False):
@@ -698,15 +700,15 @@ with tab3:
         *Or simply set `DATABASE_URL = "postgresql://user:password@host:5432/dbname"` in secrets. The app automatically detects it!*
         """)
 
-    # Trigger auto-cleanup for >15 days old entries
-    deleted_old = auto_cleanup_old_recommendations(days=15)
+    # Trigger auto-cleanup for >7 days old entries
+    deleted_old = auto_cleanup_old_recommendations(days=7)
     if deleted_old > 0:
-        st.info(f"🧹 Auto-cleaned {deleted_old} expired recommendation(s) older than 15 days.")
+        st.info(f"🧹 Auto-cleaned {deleted_old} expired recommendation(s) older than 7 days.")
 
     # Summary metrics row
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
     with m_col1:
-        st.metric("Total Active Recommendations (≤15d)", f"{db_stats['total']}")
+        st.metric("Total Active Recommendations (≤7d)", f"{db_stats['total']}")
     with m_col2:
         st.metric("Long / Short Signals", f"🟢 {db_stats['long_count']} / 🔴 {db_stats['short_count']}")
     with m_col3:
@@ -722,7 +724,7 @@ with tab3:
     with f_col1:
         date_preset = st.selectbox(
             "Date Filter Preset",
-            options=["All Valid (Last 15 Days)", "Today", "Last 7 Days", "Specific Date", "Custom Date Range"],
+            options=["All Valid (Last 7 Days)", "Today", "Last 3 Days", "Specific Date", "Custom Date Range"],
             index=0
         )
         
@@ -733,11 +735,11 @@ with tab3:
     if date_preset == "Today":
         start_filter_date = today_ist.strftime("%Y-%m-%d")
         end_filter_date = today_ist.strftime("%Y-%m-%d")
-    elif date_preset == "Last 7 Days":
-        start_filter_date = (today_ist - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+    elif date_preset == "Last 3 Days":
+        start_filter_date = (today_ist - pd.Timedelta(days=3)).strftime("%Y-%m-%d")
         end_filter_date = today_ist.strftime("%Y-%m-%d")
-    elif date_preset == "All Valid (Last 15 Days)":
-        start_filter_date = (today_ist - pd.Timedelta(days=15)).strftime("%Y-%m-%d")
+    elif date_preset == "All Valid (Last 7 Days)":
+        start_filter_date = (today_ist - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
         end_filter_date = today_ist.strftime("%Y-%m-%d")
     elif date_preset == "Specific Date":
         if avail_dates:
@@ -747,7 +749,7 @@ with tab3:
         else:
             st.info("No recorded dates yet.")
     elif date_preset == "Custom Date Range":
-        d_range = st.date_input("Date Range (IST)", value=(today_ist - pd.Timedelta(days=14), today_ist))
+        d_range = st.date_input("Date Range (IST)", value=(today_ist - pd.Timedelta(days=6), today_ist))
         if isinstance(d_range, tuple) and len(d_range) == 2:
             start_filter_date = d_range[0].strftime("%Y-%m-%d")
             end_filter_date = d_range[1].strftime("%Y-%m-%d")
@@ -771,11 +773,11 @@ with tab3:
         symbol=symbol_search,
         direction=direction_filter,
         min_ai_score=db_min_ai,
-        validity_days=15
+        validity_days=7
     )
 
     if not db_recs:
-        st.warning("No recommendations match the selected filters within the 15-day validity window.")
+        st.warning("No recommendations match the selected filters within the 7-day validity window.")
     else:
         st.success(f"Found {len(db_recs)} recommendation(s) matching your criteria.")
 
@@ -809,17 +811,24 @@ with tab3:
         view_df = df_recs[display_cols].rename(columns=rename_map)
         st.dataframe(view_df, width='stretch')
 
-        # CSV Export
-        csv_data = df_recs.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Export Filtered Recommendations (CSV)",
-            data=csv_data,
-            file_name=f"options_recommendations_{get_ist_now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
+        # CSV Export and Clear All Row
+        col_exp, col_clr = st.columns([3, 1])
+        with col_exp:
+            csv_data = df_recs.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Export Filtered Recommendations (CSV)",
+                data=csv_data,
+                file_name=f"options_recommendations_{get_ist_now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+        with col_clr:
+            if st.button("🗑️ Clear All DB Records"):
+                c_num = clear_all_recommendations()
+                st.success(f"Cleared {c_num} recommendation(s) from database.")
+                st.rerun()
 
         # Recommendation Details Expander
-        st.markdown("#### 🔍 Detailed Recommendation Cards")
+        st.markdown("#### 🔍 Detailed Recommendation Cards & Actions")
         for rec in db_recs:
             rec_id = rec['id']
             sym = rec['symbol']
@@ -829,7 +838,7 @@ with tab3:
             ai_gr = rec['ai_grade']
             badge_color = "#28a745" if dir_str == "LONG" else "#dc3545"
             
-            exp_label = f"📌 {sym} | {dir_str} Breakout | Price: ₹{rec['current_price']:.2f} | Time: {ts} | AI Score: {ai_sc if ai_sc else 'N/A'}"
+            exp_label = f"📌 #{rec_id} · {sym} | {dir_str} Breakout | Price: ₹{rec['current_price']:.2f} | Time: {ts} | AI Score: {ai_sc if ai_sc else 'N/A'}"
             with st.expander(exp_label):
                 c1, c2, c3 = st.columns(3)
                 with c1:
@@ -848,6 +857,12 @@ with tab3:
                     st.markdown(f"**Validity Remaining:** `{rec['days_remaining']} day(s)`")
                     if ai_sc:
                         st.markdown(f"**AI Score:** `{ai_sc}/100` (Grade `{ai_gr}`)")
+                    
+                    st.markdown("---")
+                    if st.button(f"🗑️ Delete Recommendation #{rec_id}", key=f"del_rec_{rec_id}"):
+                        if delete_recommendation(rec_id):
+                            st.toast(f"Deleted recommendation #{rec_id} ({sym})", icon="🗑️")
+                            st.rerun()
                         
                 if rec.get('ai_reasoning'):
                     st.markdown("**🤖 AI Reasoning:**")
