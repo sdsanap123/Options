@@ -341,6 +341,18 @@ if 'notify_signals' not in st.session_state:
     st.session_state.notify_signals = None
 if 'trigger_test_alert' not in st.session_state:
     st.session_state.trigger_test_alert = False
+if 'saved_refresh_choice' not in st.session_state:
+    st.session_state.saved_refresh_choice = "1 min"   # user's preferred in-market interval
+
+# ── Market Hours Helper ─────────────────────────────────────────────────────
+def _is_market_hours() -> bool:
+    """Return True if current IST time is within NSE market hours: Mon-Fri, 08:45–15:45."""
+    now_ist = get_ist_now()
+    if now_ist.weekday() >= 5:          # Saturday=5, Sunday=6
+        return False
+    market_open  = now_ist.replace(hour=8,  minute=45, second=0, microsecond=0)
+    market_close = now_ist.replace(hour=15, minute=45, second=0, microsecond=0)
+    return market_open <= now_ist <= market_close
 
 # Sidebar Configuration
 st.sidebar.markdown("### ⚙️ Scanner Settings")
@@ -448,21 +460,51 @@ rr_factor = 1.5 if "1.5" in rr_ratio else (2.0 if "2.0" in rr_ratio else 2.5)
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔄 Auto-Refresh Settings")
 auto_refresh = st.sidebar.checkbox("🔄 Enable Auto-Refresh", value=False)
-refresh_choice = st.sidebar.selectbox(
-    "Auto-Refresh Interval",
-    options=["1 min", "2 min", "5 min", "10 min"],
-    index=0,
-    disabled=not auto_refresh,
-    help="Select auto-refresh interval: 1 min, 2 min, 5 min, or 10 min."
-)
 
+_in_market = _is_market_hours()
 refresh_seconds_map = {
-    "1 min": 60,
-    "2 min": 120,
-    "5 min": 300,
-    "10 min": 600
+    "1 min":  60,
+    "2 min":  120,
+    "5 min":  300,
+    "10 min": 600,
 }
-refresh_interval = refresh_seconds_map[refresh_choice]
+
+if auto_refresh:
+    if _in_market:
+        # Show the real selectbox during market hours
+        refresh_choice = st.sidebar.selectbox(
+            "Auto-Refresh Interval",
+            options=["1 min", "2 min", "5 min", "10 min"],
+            index=list(refresh_seconds_map.keys()).index(
+                st.session_state.saved_refresh_choice
+                if st.session_state.saved_refresh_choice in refresh_seconds_map
+                else "1 min"
+            ),
+            help="Select auto-refresh interval during market hours."
+        )
+        # Persist user's choice whenever they change it
+        if refresh_choice != st.session_state.saved_refresh_choice:
+            st.session_state.saved_refresh_choice = refresh_choice
+        refresh_interval = refresh_seconds_map[refresh_choice]
+    else:
+        # Outside market hours — lock at 1 hour, show saved preference greyed out
+        refresh_choice = st.session_state.saved_refresh_choice  # restore label
+        refresh_interval = 3600  # 1 hour
+        st.sidebar.selectbox(
+            "Auto-Refresh Interval",
+            options=["1 min", "2 min", "5 min", "10 min"],
+            index=list(refresh_seconds_map.keys()).index(
+                st.session_state.saved_refresh_choice
+                if st.session_state.saved_refresh_choice in refresh_seconds_map
+                else "1 min"
+            ),
+            disabled=True,
+            help="Locked outside market hours. Resumes at market open (08:45 IST)."
+        )
+else:
+    # Auto-refresh disabled — still read preference for display
+    refresh_choice = st.session_state.saved_refresh_choice
+    refresh_interval = refresh_seconds_map.get(refresh_choice, 60)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔔 Setup Notification Triggers")
@@ -854,48 +896,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Active Signals & Charts", "📋 All Scanned Ti
 
 # TAB 1: Active Signals
 with tab1:
-    with st.expander("📖 Anticipation + Early Trigger Evaluation Engine (Supertrend 10, 1.2)", expanded=True):
-        _strategy_html = (
-            '<div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:1.2rem;">'
-            '<p style="color:#8a99ad;font-size:0.95rem;margin-bottom:1rem;line-height:1.5;">'
-            '⚡ <strong>Anticipation + Early Trigger Engine:</strong> '
-            'Fires signals on the <strong>Live Candle (offset -1)</strong> as soon as trend state, proximity to value, micro-breakout, and time-weighted volume velocity align.'
-            '</p>'
-            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;">'
 
-            '<div style="background:rgba(40,167,69,0.07);border-left:4px solid #28a745;border-radius:6px;padding:1rem;">'
-            '<div style="color:#28a745;font-weight:700;font-size:1rem;margin-bottom:0.6rem;">🟢 Long Trigger Criteria</div>'
-            '<ul style="margin:0;padding-left:1.2rem;color:#e5e7eb;font-size:0.88rem;line-height:1.55;">'
-            '<li style="margin-bottom:0.35rem;"><strong>Background State:</strong> Supertrend (10, 1.2) direction is Bullish (1).</li>'
-            '<li style="margin-bottom:0.35rem;"><strong>Proximity to Value:</strong> Close &gt; VWAP &amp; within 0.1% distance of VWAP or 9 EMA.</li>'
-            '<li style="margin-bottom:0.35rem;"><strong>Micro-Breakout:</strong> Live Close &gt; High of previous closed candle (offset -2).</li>'
-            '<li style="margin-bottom:0.35rem;"><strong>Volume Velocity:</strong> Time-Weighted Projected Vol &gt; 1.5x Volume SMA 20.</li>'
-            '<li><strong>Stop Loss:</strong> min(9 EMA, VWAP) with 0.05% risk floor.</li>'
-            '</ul></div>'
-
-            '<div style="background:rgba(220,53,69,0.07);border-left:4px solid #dc3545;border-radius:6px;padding:1rem;">'
-            '<div style="color:#dc3545;font-weight:700;font-size:1rem;margin-bottom:0.6rem;">🔴 Short Trigger Criteria</div>'
-            '<ul style="margin:0;padding-left:1.2rem;color:#e5e7eb;font-size:0.88rem;line-height:1.55;">'
-            '<li style="margin-bottom:0.35rem;"><strong>Background State:</strong> Supertrend (10, 1.2) direction is Bearish (-1).</li>'
-            '<li style="margin-bottom:0.35rem;"><strong>Proximity to Value:</strong> Close &lt; VWAP &amp; within 0.1% distance of VWAP or 9 EMA.</li>'
-            '<li style="margin-bottom:0.35rem;"><strong>Micro-Breakout:</strong> Live Close &lt; Low of previous closed candle (offset -2).</li>'
-            '<li style="margin-bottom:0.35rem;"><strong>Volume Velocity:</strong> Time-Weighted Projected Vol &gt; 1.5x Volume SMA 20.</li>'
-            '<li><strong>Stop Loss:</strong> max(9 EMA, VWAP) with 0.05% risk floor.</li>'
-            '</ul></div>'
-
-            '</div>'
-
-            '<div style="background:rgba(255,193,7,0.05);border-left:4px solid #ffc107;border-radius:6px;padding:1rem;">'
-            '<div style="color:#ffc107;font-weight:700;font-size:1rem;margin-bottom:0.6rem;">⚡ Elimination of Entry Lag</div>'
-            '<div style="font-size:0.88rem;color:#d1d5db;line-height:1.55;">'
-            '<p style="margin:0 0 0.4rem;"><strong>Proximity Entry:</strong> Solves overextension by enforcing entries within 0.1% of value (VWAP / 9 EMA).</p>'
-            '<p style="margin:0 0 0.4rem;"><strong>Time-Weighted Volume Projection:</strong> Projects full candle volume mid-candle: <code>(Live Vol / Elapsed Sec) * Duration</code>.</p>'
-            '<p style="margin:0;"><strong>Micro-Breakout Trigger:</strong> Captures early momentum as soon as price breaks previous candle range.</p>'
-            '</div></div>'
-
-            '</div>'
-        )
-        st.markdown(_strategy_html, unsafe_allow_html=True)
 
     col_stat1, col_stat2 = st.columns([3, 1])
     with col_stat1:
@@ -1250,8 +1251,39 @@ with tab3:
                 if rec.get('news_sentiment'):
                     st.markdown(f"**📰 News Sentiment:** {rec['news_sentiment']} — {rec.get('news_summary', '')}")
 
-# Autorefresh runner logic
+# ── Autorefresh runner logic ──────────────────────────────────────────────────
 if auto_refresh:
-    st.sidebar.caption(f"⏱️ Auto-refresh active ({refresh_choice}). Next scan in {refresh_interval}s...")
-    time.sleep(refresh_interval)
-    st.rerun()
+    _in_market_now = _is_market_hours()
+    _now_ist = get_ist_now()
+
+    if _in_market_now:
+        # ── In-market: scan at user's chosen interval ───────────────────────
+        st.sidebar.success(
+            f"🟢 **Market Open** — scanning every **{refresh_choice}**"
+        )
+        time.sleep(refresh_interval)
+        st.rerun()
+    else:
+        # ── Outside market hours: sleep 1 hour then re-check ─────────────
+        # Calculate next market open (08:45 IST next trading day)
+        _market_open_today = _now_ist.replace(hour=8, minute=45, second=0, microsecond=0)
+        if _now_ist < _market_open_today and _now_ist.weekday() < 5:
+            _next_open = _market_open_today
+        else:
+            # advance to next weekday
+            _days_ahead = 1
+            while (_now_ist + __import__('datetime').timedelta(days=_days_ahead)).weekday() >= 5:
+                _days_ahead += 1
+            _next_day = _now_ist + __import__('datetime').timedelta(days=_days_ahead)
+            _next_open = _next_day.replace(hour=8, minute=45, second=0, microsecond=0)
+
+        _mins_to_open = max(0, int((_next_open - _now_ist).total_seconds() // 60))
+        _hrs, _mins = divmod(_mins_to_open, 60)
+        _eta = f"{_hrs}h {_mins}m" if _hrs else f"{_mins}m"
+
+        st.sidebar.warning(
+            f"🔴 **Market Closed** — next check in **1 hour**\n"
+            f"🕓 Market opens in **{_eta}** | Saved interval: **{st.session_state.saved_refresh_choice}**"
+        )
+        time.sleep(3600)   # 1-hour heartbeat during off-hours
+        st.rerun()
