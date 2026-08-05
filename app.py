@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import subprocess
+import requests
 import streamlit.components.v1 as components
 
 # Ensure local directories are in path
@@ -31,22 +32,70 @@ from utils.database import (
 )
 
 # ── Telegram Push Notification Support ─────────────────────────────────────────
-def send_telegram_notification(bot_token: str, chat_id: str, message: str) -> bool:
-    """Send a formatted message via Telegram Bot API using requests."""
-    if not bot_token or not chat_id:
-        return False
+def send_telegram_notification(bot_token: str, chat_id: str, message: str, html_mode: bool = True) -> tuple[bool, str]:
+    """
+    Send a formatted message via Telegram Bot API.
+    Returns (success: bool, detail_msg: str) for precise UI diagnostics.
+    """
+    token = bot_token.strip() if bot_token else ""
+    chat = chat_id.strip() if chat_id else ""
+    
+    if not token:
+        return False, "Bot Token is empty."
+    if not chat:
+        return False, "Chat ID is empty."
+    
+    # Strip leading 'bot' prefix if user accidentally included it in token field
+    if token.lower().startswith("bot") and ":" in token:
+        token = token[3:]
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    
+    # Use HTML formatting
+    payload = {
+        "chat_id": chat,
+        "text": message,
+        "parse_mode": "HTML" if html_mode else None,
+        "disable_web_page_preview": True
+    }
+    
     try:
-        url = f"https://api.telegram.org/bot{bot_token.strip()}/sendMessage"
-        payload = {
-            "chat_id": chat_id.strip(),
-            "text": message,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": True
-        }
-        resp = requests.post(url, json=payload, timeout=6)
-        return resp.status_code == 200
+        resp = requests.post(url, json=payload, timeout=8)
+        if resp.status_code == 200:
+            return True, "Message sent successfully!"
+            
+        try:
+            data = resp.json()
+            err_desc = data.get("description", resp.text)
+        except Exception:
+            err_desc = resp.text
+        
+        # Provide user-friendly hints for common Telegram API status codes
+        if resp.status_code == 401:
+            return False, f"HTTP 401 (Unauthorized): Invalid Bot Token. Please check token from @BotFather."
+        elif resp.status_code == 400:
+            if "chat not found" in err_desc.lower():
+                return False, (
+                    "HTTP 400 (Chat Not Found): Telegram couldn't find this chat.\n"
+                    "👉 STEP 1: Open your bot in Telegram and tap /START.\n"
+                    "👉 STEP 2: Use your numeric Chat ID from @userinfobot (e.g. 987654321), NOT your bot's name."
+                )
+            # Fallback to plain text if HTML entity parsing failed
+            if html_mode and ("parse" in err_desc.lower() or "entity" in err_desc.lower()):
+                payload.pop("parse_mode", None)
+                resp_plain = requests.post(url, json=payload, timeout=8)
+                if resp_plain.status_code == 200:
+                    return True, "Message sent (fallback to plain text)."
+            return False, f"HTTP 400 (Bad Request): {err_desc}"
+        elif resp.status_code == 403:
+            return False, f"HTTP 403 (Forbidden): {err_desc}. 👉 Open your Telegram bot and press /START first!"
+        else:
+            return False, f"HTTP {resp.status_code}: {err_desc}"
+            
+    except requests.exceptions.Timeout:
+        return False, "Network Timeout: Could not reach Telegram API within 8 seconds."
     except Exception as e:
-        return False
+        return False, f"Connection Error: {str(e)}"
 def send_windows_notification(title: str, message: str, duration_ms: int = 8000):
     """Fires a Windows system tray balloon notification using PowerShell (no extra packages needed)."""
     # Truncate to safe lengths for the balloon tip
@@ -170,7 +219,10 @@ def render_notification_trigger(symbols_list, sound_enabled=True, desktop_enable
     }})();
     </script>
     """
-    components.html(html_code, height=0, width=0)
+    if hasattr(st, "html"):
+        st.html(html_code)
+    else:
+        components.html(html_code, height=0, width=0)
 
 
 # Initialize SQLite Database & Auto-cleanup (>15 days old)
@@ -261,6 +313,14 @@ if 'running' not in st.session_state:
     st.session_state.running = False
 if 'scan_params' not in st.session_state:
     st.session_state.scan_params = None
+if 'groq_api_key' not in st.session_state:
+    groq_def = os.getenv("GROQ_API_KEY", "")
+    try:
+        groq_def = groq_def or st.secrets.get("GROQ_API_KEY", "")
+    except Exception:
+        pass
+    st.session_state.groq_api_key = groq_def
+
 if 'telegram_bot_token' not in st.session_state:
     token_def = os.getenv("TELEGRAM_BOT_TOKEN", "")
     try:
@@ -580,7 +640,7 @@ def run_scan():
 
         # ── Send Telegram Bot Push Notification (iOS / Android / Cloud) ─────────
         if enable_telegram and st.session_state.telegram_bot_token and st.session_state.telegram_chat_id:
-            tg_lines = [f"⚡ *INTRADAY BREAKOUT SETUP DETECTED ({len(found_signals)})*\n"]
+            tg_lines = [f"⚡ <b>INTRADAY BREAKOUT SETUP DETECTED ({len(found_signals)})</b>\n"]
             for sig in found_signals[:10]:
                 sym = sig['symbol'].replace('.NS', '')
                 d = sig['direction']
@@ -588,17 +648,17 @@ def run_scan():
                 sl = sig['stop_loss']
                 t = sig.get('target_custom', sig['target_2_0'])
                 vr = sig['volume_ratio']
-                rvol_str = f"🔥 *{vr:.2f}x*" if vr >= 2.0 else f"{vr:.2f}x"
+                rvol_str = f"🔥 <b>{vr:.2f}x</b>" if vr >= 2.0 else f"{vr:.2f}x"
                 ai_str = f" | AI: {sig['ai_score']['score']}/100" if sig.get('ai_score') else ""
                 
                 direction_emoji = "🟢" if d == "LONG" else "🔴"
                 tg_lines.append(
-                    f"{direction_emoji} *{sym}* ({d})\n"
+                    f"{direction_emoji} <b>{sym}</b> ({d})\n"
                     f"• Price: ₹{p:.2f} | SL: ₹{sl:.2f} | Target: ₹{t:.2f}\n"
                     f"• Vol Ratio: {rvol_str}{ai_str}\n"
                 )
             
-            tg_msg = "\n".join(tg_lines) + f"⏱️ *Time:* {get_ist_now().strftime('%H:%M:%S IST')}"
+            tg_msg = "\n".join(tg_lines) + f"⏱️ <b>Time:</b> {get_ist_now().strftime('%H:%M:%S IST')}"
             send_telegram_notification(st.session_state.telegram_bot_token, st.session_state.telegram_chat_id, tg_msg)
     st.session_state.scan_params = {
         'timeframe': timeframe,
@@ -763,17 +823,21 @@ if st.session_state.get('trigger_test_alert'):
     if enable_telegram:
         if st.session_state.telegram_bot_token and st.session_state.telegram_chat_id:
             test_tg_msg = (
-                "🧪 *TEST ALERT — Intraday Options Scanner*\n\n"
-                "🟢 *RELIANCE* (LONG)\n• Price: ₹2,540.50 | SL: ₹2,520.00 | Target: ₹2,581.00\n• Vol Ratio: 🔥 *2.45x* | AI: 85/100 (Grade A)\n\n"
-                "🔴 *TATAMOTORS* (SHORT)\n• Price: ₹980.20 | SL: ₹995.00 | Target: ₹950.40\n• Vol Ratio: 1.85x | AI: 78/100 (Grade B)\n\n"
-                f"⏱️ *Time:* {get_ist_now().strftime('%H:%M:%S IST')}"
+                "🧪 <b>TEST ALERT — Intraday Options Scanner</b>\n\n"
+                "🟢 <b>RELIANCE</b> (LONG)\n• Price: ₹2,540.50 | SL: ₹2,520.00 | Target: ₹2,581.00\n• Vol Ratio: 🔥 <b>2.45x</b> | AI: 85/100 (Grade A)\n\n"
+                "🔴 <b>TATAMOTORS</b> (SHORT)\n• Price: ₹980.20 | SL: ₹995.00 | Target: ₹950.40\n• Vol Ratio: 1.85x | AI: 78/100 (Grade B)\n\n"
+                f"⏱️ <b>Time:</b> {get_ist_now().strftime('%H:%M:%S IST')}"
             )
-            if send_telegram_notification(st.session_state.telegram_bot_token, st.session_state.telegram_chat_id, test_tg_msg):
+            ok, detail = send_telegram_notification(st.session_state.telegram_bot_token, st.session_state.telegram_chat_id, test_tg_msg)
+            if ok:
                 st.toast("📱 Telegram test alert sent to your phone!", icon="✅")
+                st.success(f"📱 **Telegram Push Alert:** {detail}")
             else:
-                st.toast("❌ Telegram alert failed. Please check your Bot Token and Chat ID.", icon="⚠️")
+                st.toast(f"❌ Telegram alert failed: {detail}", icon="⚠️")
+                st.error(f"❌ **Telegram Notification Error:** {detail}")
         else:
-            st.toast("⚠️ Telegram enabled but Bot Token / Chat ID missing.", icon="⚠️")
+            st.toast("⚠️ Telegram enabled but Bot Token or Chat ID is missing.", icon="⚠️")
+            st.warning("⚠️ **Telegram Config Missing:** Please enter your Bot Token and Chat ID in the sidebar under *Telegram Bot Config*.")
 
 if st.session_state.get('notify_signals'):
     notif_list = st.session_state.notify_signals
