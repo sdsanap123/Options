@@ -8,6 +8,7 @@ from datetime import datetime
 import os
 import sys
 import json
+import subprocess
 import streamlit.components.v1 as components
 
 # Ensure local directories are in path
@@ -28,6 +29,55 @@ from utils.database import (
     delete_recommendation,
     clear_all_recommendations
 )
+
+# ── Telegram Push Notification Support ─────────────────────────────────────────
+def send_telegram_notification(bot_token: str, chat_id: str, message: str) -> bool:
+    """Send a formatted message via Telegram Bot API using requests."""
+    if not bot_token or not chat_id:
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{bot_token.strip()}/sendMessage"
+        payload = {
+            "chat_id": chat_id.strip(),
+            "text": message,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        }
+        resp = requests.post(url, json=payload, timeout=6)
+        return resp.status_code == 200
+    except Exception as e:
+        return False
+def send_windows_notification(title: str, message: str, duration_ms: int = 8000):
+    """Fires a Windows system tray balloon notification using PowerShell (no extra packages needed)."""
+    # Truncate to safe lengths for the balloon tip
+    title_safe   = title[:63]   if len(title)   > 63   else title
+    message_safe = message[:255] if len(message) > 255 else message
+
+    ps_script = f"""
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type -AssemblyName System.Windows.Forms
+$ico = [System.Drawing.SystemIcons]::Information
+$n = New-Object System.Windows.Forms.NotifyIcon
+$n.Icon = $ico
+$n.BalloonTipTitle = "{title_safe}"
+$n.BalloonTipText  = "{message_safe}"
+$n.BalloonTipIcon  = "Info"
+$n.Visible = $true
+$n.ShowBalloonTip({duration_ms})
+Start-Sleep -Milliseconds {duration_ms + 500}
+$n.Dispose()
+"""
+    try:
+        # Fire and forget — runs in background so Streamlit is never blocked
+        subprocess.Popen(
+            ['powershell', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', ps_script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+        )
+    except Exception:
+        pass  # Silently fail — notification is best-effort
+
 
 # Notification helper function
 def render_notification_trigger(symbols_list, sound_enabled=True, desktop_enabled=True):
@@ -211,8 +261,22 @@ if 'running' not in st.session_state:
     st.session_state.running = False
 if 'scan_params' not in st.session_state:
     st.session_state.scan_params = None
-if 'groq_api_key' not in st.session_state:
-    st.session_state.groq_api_key = os.getenv("GROQ_API_KEY", "")
+if 'telegram_bot_token' not in st.session_state:
+    token_def = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    try:
+        token_def = token_def or st.secrets.get("TELEGRAM_BOT_TOKEN", "")
+    except Exception:
+        pass
+    st.session_state.telegram_bot_token = token_def
+
+if 'telegram_chat_id' not in st.session_state:
+    chat_def = os.getenv("TELEGRAM_CHAT_ID", "")
+    try:
+        chat_def = chat_def or st.secrets.get("TELEGRAM_CHAT_ID", "")
+    except Exception:
+        pass
+    st.session_state.telegram_chat_id = chat_def
+
 if 'notify_signals' not in st.session_state:
     st.session_state.notify_signals = None
 if 'trigger_test_alert' not in st.session_state:
@@ -345,7 +409,27 @@ st.sidebar.markdown("### 🔔 Setup Notification Triggers")
 enable_sound_alert = st.sidebar.checkbox("🔊 Audio Sound Alert", value=True, help="Play multi-tone chime alert when a setup is found.")
 enable_desktop_alert = st.sidebar.checkbox("💻 Desktop Browser Popup", value=True, help="Trigger browser desktop popup notification when a setup is found.")
 
-if st.sidebar.button("🧪 Test Sound & Notification", help="Click to test audio sound chime and browser desktop popup notification"):
+enable_telegram = st.sidebar.checkbox(
+    "📱 Telegram Push Alerts (iOS / Android)",
+    value=bool(st.session_state.telegram_bot_token and st.session_state.telegram_chat_id),
+    help="Send instant push notifications to your mobile phone via Telegram Bot when setups fire."
+)
+
+if enable_telegram:
+    with st.sidebar.expander("📱 Telegram Bot Config", expanded=not (st.session_state.telegram_bot_token and st.session_state.telegram_chat_id)):
+        st.markdown(
+            "**Quick Setup:**\n"
+            "1. Search `@BotFather` on Telegram → `/newbot` to get your **Bot Token**.\n"
+            "2. Search `@userinfobot` on Telegram to get your numeric **Chat ID**."
+        )
+        t_token = st.text_input("Bot Token", value=st.session_state.telegram_bot_token, type="password", help="e.g. 123456789:ABCdefGhIJKlmNo")
+        t_chat  = st.text_input("Chat ID", value=st.session_state.telegram_chat_id, help="e.g. 987654321")
+        if t_token != st.session_state.telegram_bot_token:
+            st.session_state.telegram_bot_token = t_token.strip()
+        if t_chat != st.session_state.telegram_chat_id:
+            st.session_state.telegram_chat_id = t_chat.strip()
+
+if st.sidebar.button("🧪 Test Sound & Notifications", help="Click to test audio sound chime, browser desktop popup, and Telegram alert"):
     st.session_state.trigger_test_alert = True
 
 st.sidebar.markdown("---")
@@ -484,7 +568,38 @@ def run_scan():
         if saved_num > 0:
             st.toast(f"💾 Saved {saved_num} new recommendation(s) to Database!", icon="💾")
         # Store signals for notification trigger
-        st.session_state.notify_signals = [f"{s['symbol'].replace('.NS', '')} ({s['direction']})" for s in found_signals]
+        notif_syms = [f"{s['symbol'].replace('.NS', '')} ({s['direction']})" for s in found_signals]
+        st.session_state.notify_signals = notif_syms
+
+        # ── Fire real Windows system notification immediately ──────────────────
+        title   = f"⚡ {len(notif_syms)} Setup(s) Found! — Options Scanner"
+        message = "Setup detected: " + ", ".join(notif_syms[:8])  # cap at 8 to stay within 255 chars
+        if len(notif_syms) > 8:
+            message += f" (+{len(notif_syms) - 8} more)"
+        send_windows_notification(title, message)
+
+        # ── Send Telegram Bot Push Notification (iOS / Android / Cloud) ─────────
+        if enable_telegram and st.session_state.telegram_bot_token and st.session_state.telegram_chat_id:
+            tg_lines = [f"⚡ *INTRADAY BREAKOUT SETUP DETECTED ({len(found_signals)})*\n"]
+            for sig in found_signals[:10]:
+                sym = sig['symbol'].replace('.NS', '')
+                d = sig['direction']
+                p = sig['current_price']
+                sl = sig['stop_loss']
+                t = sig.get('target_custom', sig['target_2_0'])
+                vr = sig['volume_ratio']
+                rvol_str = f"🔥 *{vr:.2f}x*" if vr >= 2.0 else f"{vr:.2f}x"
+                ai_str = f" | AI: {sig['ai_score']['score']}/100" if sig.get('ai_score') else ""
+                
+                direction_emoji = "🟢" if d == "LONG" else "🔴"
+                tg_lines.append(
+                    f"{direction_emoji} *{sym}* ({d})\n"
+                    f"• Price: ₹{p:.2f} | SL: ₹{sl:.2f} | Target: ₹{t:.2f}\n"
+                    f"• Vol Ratio: {rvol_str}{ai_str}\n"
+                )
+            
+            tg_msg = "\n".join(tg_lines) + f"⏱️ *Time:* {get_ist_now().strftime('%H:%M:%S IST')}"
+            send_telegram_notification(st.session_state.telegram_bot_token, st.session_state.telegram_chat_id, tg_msg)
     st.session_state.scan_params = {
         'timeframe': timeframe,
         'ticker_source': ticker_source,
@@ -505,18 +620,36 @@ if scan_clicked or (auto_refresh and not st.session_state.running):
 
 # ── Reusable Breakout Chart Renderer ──────────────────────────────────────────
 def render_breakout_chart(sig_data: dict):
-    """Renders a clean interactive Plotly chart with candlesticks, VWAP, and VWAP ±0.3% bands."""
-    df = sig_data['df']
+    """Renders an interactive Plotly chart: price + VWAP bands (top) + RVOL panel (bottom)."""
+    df = sig_data['df'].copy()
     symbol = sig_data['symbol'].replace('.NS', '')
+    live_rvol = sig_data.get('volume_ratio', None)
 
-    fig = go.Figure()
+    # ── Compute RVOL series ─────────────────────────────────────────────────────
+    if 'Vol_SMA20' in df.columns and df['Vol_SMA20'].gt(0).any():
+        df['RVOL'] = df['Volume'] / df['Vol_SMA20']
+    else:
+        df['Vol_SMA20_calc'] = df['Volume'].rolling(window=20).mean()
+        df['RVOL'] = df['Volume'] / df['Vol_SMA20_calc'].replace(0, float('nan'))
+    df['RVOL'] = df['RVOL'].clip(lower=0)
 
-    # Candlesticks
+    # Bar colours: gold if RVOL ≥ 2.0, slate-grey otherwise
+    rvol_colors = ['#ffc107' if v >= 2.0 else '#546e7a' for v in df['RVOL'].fillna(0)]
+
+    # ── Build subplot figure ────────────────────────────────────────────────────
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        row_heights=[0.72, 0.28],
+        vertical_spacing=0.02
+    )
+
+    # ── Row 1: Candlesticks ─────────────────────────────────────────────────────
     fig.add_trace(go.Candlestick(
         x=df.index,
         open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
         name="Price"
-    ))
+    ), row=1, col=1)
 
     # VWAP (solid orange)
     fig.add_trace(go.Scatter(
@@ -525,75 +658,95 @@ def render_breakout_chart(sig_data: dict):
         name="VWAP",
         text=[f"VWAP: ₹{v:.2f}" for v in df['VWAP']],
         hoverinfo='text'
-    ))
+    ), row=1, col=1)
 
-    # VWAP +0.1% band (upper - cyan)
+    # VWAP ±0.1% bands (cyan dashed)
     vwap_upper_01 = df['VWAP'] * 1.001
+    vwap_lower_01 = df['VWAP'] * 0.999
     fig.add_trace(go.Scatter(
         x=df.index, y=vwap_upper_01,
         line=dict(color='#00e5ff', width=1.2, dash='dash'),
-        opacity=0.75,
-        name="VWAP +0.1%",
-        text=[f"VWAP +0.1%: ₹{v:.2f}" for v in vwap_upper_01],
-        hoverinfo='text'
-    ))
-
-    # VWAP -0.1% band (lower - cyan)
-    vwap_lower_01 = df['VWAP'] * 0.999
+        opacity=0.75, name="VWAP +0.1%",
+        text=[f"VWAP +0.1%: ₹{v:.2f}" for v in vwap_upper_01], hoverinfo='text'
+    ), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=df.index, y=vwap_lower_01,
         line=dict(color='#00e5ff', width=1.2, dash='dash'),
-        opacity=0.75,
-        name="VWAP -0.1%",
-        text=[f"VWAP -0.1%: ₹{v:.2f}" for v in vwap_lower_01],
-        hoverinfo='text'
-    ))
+        opacity=0.75, name="VWAP -0.1%",
+        text=[f"VWAP -0.1%: ₹{v:.2f}" for v in vwap_lower_01], hoverinfo='text'
+    ), row=1, col=1)
 
-    # VWAP +0.3% band (upper - orange dot)
+    # VWAP ±0.3% bands (orange dotted)
     vwap_upper = df['VWAP'] * 1.003
+    vwap_lower = df['VWAP'] * 0.997
     fig.add_trace(go.Scatter(
         x=df.index, y=vwap_upper,
         line=dict(color='#ff9800', width=1, dash='dot'),
-        opacity=0.55,
-        name="VWAP +0.3%",
-        text=[f"VWAP +0.3%: ₹{v:.2f}" for v in vwap_upper],
-        hoverinfo='text'
-    ))
-
-    # VWAP -0.3% band (lower - orange dot)
-    vwap_lower = df['VWAP'] * 0.997
+        opacity=0.55, name="VWAP +0.3%",
+        text=[f"VWAP +0.3%: ₹{v:.2f}" for v in vwap_upper], hoverinfo='text'
+    ), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=df.index, y=vwap_lower,
         line=dict(color='#ff9800', width=1, dash='dot'),
-        opacity=0.55,
-        name="VWAP -0.3%",
-        text=[f"VWAP -0.3%: ₹{v:.2f}" for v in vwap_lower],
-        hoverinfo='text'
-    ))
+        opacity=0.55, name="VWAP -0.3%",
+        text=[f"VWAP -0.3%: ₹{v:.2f}" for v in vwap_lower], hoverinfo='text'
+    ), row=1, col=1)
 
-    # Layout
+    # ── Row 2: RVOL bars ────────────────────────────────────────────────────────
+    fig.add_trace(go.Bar(
+        x=df.index,
+        y=df['RVOL'].fillna(0),
+        name="RVOL",
+        marker_color=rvol_colors,
+        opacity=0.85,
+        text=[f"RVOL: {v:.2f}x" for v in df['RVOL'].fillna(0)],
+        hoverinfo='text'
+    ), row=2, col=1)
+
+    # RVOL 2.0 reference line (dashed amber)
+    fig.add_hline(
+        y=2.0,
+        line=dict(color='#ffc107', width=1.5, dash='dash'),
+        row=2, col=1,
+        annotation_text="RVOL 2.0",
+        annotation_position="top left",
+        annotation_font=dict(color='#ffc107', size=11)
+    )
+
+    # ── Layout ──────────────────────────────────────────────────────────────────
     rangebreak_cfg = [
         dict(bounds=["sat", "mon"]),
         dict(bounds=[15.5, 9.25], pattern="hour")
     ]
     fig.update_layout(
-        height=600,
+        height=700,
         xaxis_rangeslider_visible=False,
         paper_bgcolor='#11151c', plot_bgcolor='#11151c',
         font_color='#8a99ad',
         margin=dict(t=16, b=40, l=30, r=30),
-        legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="left", x=0)
+        legend=dict(orientation="h", yanchor="top", y=1.0, xanchor="left", x=0),
+        bargap=0.15,
     )
     fig.update_xaxes(gridcolor='rgba(255,255,255,0.05)', rangebreaks=rangebreak_cfg)
-    fig.update_yaxes(gridcolor='rgba(255,255,255,0.05)')
+    fig.update_yaxes(gridcolor='rgba(255,255,255,0.05)', row=1, col=1)
+    fig.update_yaxes(
+        gridcolor='rgba(255,255,255,0.05)',
+        title_text="RVOL",
+        title_font=dict(size=11, color='#8a99ad'),
+        row=2, col=1
+    )
+    # Hide x-axis labels on top panel (shared axis handles it)
+    fig.update_xaxes(showticklabels=False, row=1, col=1)
+    fig.update_xaxes(rangebreaks=rangebreak_cfg, row=2, col=1)
 
     st.plotly_chart(fig, width='stretch')
 
     display_tf = st.session_state.scan_params['timeframe'] if st.session_state.scan_params else timeframe
-    chart_title = f"{symbol} — Intraday Price + VWAP ±0.1% & ±0.3% ({display_tf})"
+    rvol_label = f" · Live RVOL: <b style='color:#ffc107'>{live_rvol:.2f}x</b>" if live_rvol is not None else ""
+    chart_title = f"{symbol} — Price + VWAP ±0.1% & ±0.3% · RVOL 2.0 Indicator ({display_tf})"
     st.markdown(
         f'<div style="text-align:center;color:#8a99ad;font-size:0.9rem;margin-top:-0.5rem;margin-bottom:0.8rem;">'
-        f'📊 {chart_title}</div>',
+        f'📊 {chart_title}{rvol_label}</div>',
         unsafe_allow_html=True
     )
 
@@ -603,16 +756,33 @@ def render_breakout_chart(sig_data: dict):
 if st.session_state.get('trigger_test_alert'):
     st.session_state.trigger_test_alert = False
     st.toast("🧪 Test Notification Alert Triggered!", icon="🔔")
-    st.info("🔔 **TEST NOTIFICATION TRIGGERED:** Audio chime sound played & browser popup sent!")
+    st.info("🔔 **TEST NOTIFICATION TRIGGERED:** Audio chime + Windows tray popup + browser popup sent!")
     render_notification_trigger(["RELIANCE (LONG)", "TATAMOTORS (SHORT)"], sound_enabled=enable_sound_alert, desktop_enabled=enable_desktop_alert)
+    send_windows_notification("⚡ Test — Options Scanner", "Test alert: RELIANCE (LONG), TATAMOTORS (SHORT)")
+    
+    if enable_telegram:
+        if st.session_state.telegram_bot_token and st.session_state.telegram_chat_id:
+            test_tg_msg = (
+                "🧪 *TEST ALERT — Intraday Options Scanner*\n\n"
+                "🟢 *RELIANCE* (LONG)\n• Price: ₹2,540.50 | SL: ₹2,520.00 | Target: ₹2,581.00\n• Vol Ratio: 🔥 *2.45x* | AI: 85/100 (Grade A)\n\n"
+                "🔴 *TATAMOTORS* (SHORT)\n• Price: ₹980.20 | SL: ₹995.00 | Target: ₹950.40\n• Vol Ratio: 1.85x | AI: 78/100 (Grade B)\n\n"
+                f"⏱️ *Time:* {get_ist_now().strftime('%H:%M:%S IST')}"
+            )
+            if send_telegram_notification(st.session_state.telegram_bot_token, st.session_state.telegram_chat_id, test_tg_msg):
+                st.toast("📱 Telegram test alert sent to your phone!", icon="✅")
+            else:
+                st.toast("❌ Telegram alert failed. Please check your Bot Token and Chat ID.", icon="⚠️")
+        else:
+            st.toast("⚠️ Telegram enabled but Bot Token / Chat ID missing.", icon="⚠️")
 
 if st.session_state.get('notify_signals'):
     notif_list = st.session_state.notify_signals
     st.session_state.notify_signals = None  # Reset so it doesn't re-fire on non-scan reruns
-    
+
     st.toast(f"🚨 SETUP FOUND: {', '.join(notif_list)}", icon="⚡")
     st.success(f"⚡ **NOTIFICATION TRIGGERED:** Found {len(notif_list)} setup(s): **{', '.join(notif_list)}**")
     render_notification_trigger(notif_list, sound_enabled=enable_sound_alert, desktop_enabled=enable_desktop_alert)
+    # Windows system notification already fired synchronously inside run_scan()
 
 # ── Layout Tabs ────────────────────────────────────────────────────────────────
 
