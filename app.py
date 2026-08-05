@@ -7,6 +7,8 @@ import time
 from datetime import datetime
 import os
 import sys
+import json
+import streamlit.components.v1 as components
 
 # Ensure local directories are in path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -26,6 +28,100 @@ from utils.database import (
     delete_recommendation,
     clear_all_recommendations
 )
+
+# Notification helper function
+def render_notification_trigger(symbols_list, sound_enabled=True, desktop_enabled=True):
+    """Fires Web Audio API chime sound & HTML5 Desktop Notification when setups are found."""
+    symbols_json = json.dumps(symbols_list)
+    sound_js = "true" if sound_enabled else "false"
+    desktop_js = "true" if desktop_enabled else "false"
+    
+    html_code = f"""
+    <script>
+    (function() {{
+        const symbols = {symbols_json};
+        console.log("Triggering setup notification for:", symbols);
+        
+        // 1. Play Web Audio API Chime Sound
+        if ({sound_js}) {{
+            try {{
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (AudioCtx) {{
+                    const ctx = new AudioCtx();
+                    if (ctx.state === 'suspended') {{
+                        ctx.resume();
+                    }}
+                    
+                    function playTone(freq, type, startTime, duration) {{
+                        const osc = ctx.createOscillator();
+                        const gain = ctx.createGain();
+                        osc.type = type;
+                        osc.frequency.setValueAtTime(freq, ctx.currentTime + startTime);
+                        gain.gain.setValueAtTime(0.4, ctx.currentTime + startTime);
+                        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + startTime + duration);
+                        osc.connect(gain);
+                        gain.connect(ctx.destination);
+                        osc.start(ctx.currentTime + startTime);
+                        osc.stop(ctx.currentTime + startTime + duration);
+                    }}
+                    
+                    // Multi-tone chime sound alert (C5 -> E5 -> G5 -> C6)
+                    playTone(523.25, 'sine', 0.0, 0.15);
+                    playTone(659.25, 'sine', 0.12, 0.15);
+                    playTone(783.99, 'sine', 0.24, 0.15);
+                    playTone(1046.50, 'sine', 0.36, 0.35);
+                }}
+            }} catch(e) {{
+                console.error("Audio notification error:", e);
+            }}
+        }}
+
+        // 2. Desktop Browser Notification API
+        if ({desktop_js}) {{
+            try {{
+                const title = "⚡ Breakout Setup Found! (" + symbols.length + ")";
+                const body = "Setup detected for: " + symbols.join(", ");
+                
+                function showNotification() {{
+                    try {{
+                        new Notification(title, {{
+                            body: body,
+                            icon: "https://fav.farm/⚡",
+                            requireInteraction: true
+                        }});
+                    }} catch(err) {{
+                        console.log("Direct notification error:", err);
+                    }}
+                }}
+
+                if ("Notification" in window) {{
+                    if (Notification.permission === "granted") {{
+                        showNotification();
+                    }} else if (Notification.permission !== "denied") {{
+                        Notification.requestPermission().then(perm => {{
+                            if (perm === "granted") showNotification();
+                        }});
+                    }}
+                }}
+                
+                if (window.parent && window.parent !== window && window.parent.Notification) {{
+                    if (window.parent.Notification.permission === "granted") {{
+                        try {{ new window.parent.Notification(title, {{ body: body }}); }} catch(e){{}}
+                    }} else if (window.parent.Notification.permission !== "denied") {{
+                        window.parent.Notification.requestPermission().then(perm => {{
+                            if (perm === "granted") try {{ new window.parent.Notification(title, {{ body: body }}); }} catch(e){{}}
+                        }});
+                    }}
+                }}
+            }} catch(e) {{
+                console.error("Desktop notification error:", e);
+            }}
+        }}
+    }})();
+    </script>
+    """
+    components.html(html_code, height=0, width=0)
+
 
 # Initialize SQLite Database & Auto-cleanup (>15 days old)
 init_db()
@@ -117,6 +213,10 @@ if 'scan_params' not in st.session_state:
     st.session_state.scan_params = None
 if 'groq_api_key' not in st.session_state:
     st.session_state.groq_api_key = os.getenv("GROQ_API_KEY", "")
+if 'notify_signals' not in st.session_state:
+    st.session_state.notify_signals = None
+if 'trigger_test_alert' not in st.session_state:
+    st.session_state.trigger_test_alert = False
 
 # Sidebar Configuration
 st.sidebar.markdown("### ⚙️ Scanner Settings")
@@ -220,10 +320,35 @@ ignore_vol = st.sidebar.checkbox(
 rr_ratio = st.sidebar.selectbox("Risk-to-Reward Ratio Target", options=["1:1.5", "1:2.0", "1:2.5"], index=0)
 rr_factor = 1.5 if "1.5" in rr_ratio else (2.0 if "2.0" in rr_ratio else 2.5)
 
-# Refresh Mode
+# Refresh Mode & Notifications
 st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔄 Auto-Refresh Settings")
 auto_refresh = st.sidebar.checkbox("🔄 Enable Auto-Refresh", value=False)
-refresh_interval = st.sidebar.slider("Refresh Interval (seconds)", min_value=10, max_value=120, value=30, step=5)
+refresh_choice = st.sidebar.selectbox(
+    "Auto-Refresh Interval",
+    options=["1 min", "2 min", "5 min", "10 min"],
+    index=0,
+    disabled=not auto_refresh,
+    help="Select auto-refresh interval: 1 min, 2 min, 5 min, or 10 min."
+)
+
+refresh_seconds_map = {
+    "1 min": 60,
+    "2 min": 120,
+    "5 min": 300,
+    "10 min": 600
+}
+refresh_interval = refresh_seconds_map[refresh_choice]
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔔 Setup Notification Triggers")
+enable_sound_alert = st.sidebar.checkbox("🔊 Audio Sound Alert", value=True, help="Play multi-tone chime alert when a setup is found.")
+enable_desktop_alert = st.sidebar.checkbox("💻 Desktop Browser Popup", value=True, help="Trigger browser desktop popup notification when a setup is found.")
+
+if st.sidebar.button("🧪 Test Sound & Notification", help="Click to test audio sound chime and browser desktop popup notification"):
+    st.session_state.trigger_test_alert = True
+
+st.sidebar.markdown("---")
 
 # Main Scan Trigger Button
 col_btn1, col_btn2 = st.sidebar.columns(2)
@@ -358,6 +483,8 @@ def run_scan():
         saved_num = save_recommendations_batch(found_signals, validity_days=7)
         if saved_num > 0:
             st.toast(f"💾 Saved {saved_num} new recommendation(s) to Database!", icon="💾")
+        # Store signals for notification trigger
+        st.session_state.notify_signals = [f"{s['symbol'].replace('.NS', '')} ({s['direction']})" for s in found_signals]
     st.session_state.scan_params = {
         'timeframe': timeframe,
         'ticker_source': ticker_source,
@@ -471,6 +598,21 @@ def render_breakout_chart(sig_data: dict):
     )
 
 
+
+# ── Notification Trigger Handler ──────────────────────────────────────────────
+if st.session_state.get('trigger_test_alert'):
+    st.session_state.trigger_test_alert = False
+    st.toast("🧪 Test Notification Alert Triggered!", icon="🔔")
+    st.info("🔔 **TEST NOTIFICATION TRIGGERED:** Audio chime sound played & browser popup sent!")
+    render_notification_trigger(["RELIANCE (LONG)", "TATAMOTORS (SHORT)"], sound_enabled=enable_sound_alert, desktop_enabled=enable_desktop_alert)
+
+if st.session_state.get('notify_signals'):
+    notif_list = st.session_state.notify_signals
+    st.session_state.notify_signals = None  # Reset so it doesn't re-fire on non-scan reruns
+    
+    st.toast(f"🚨 SETUP FOUND: {', '.join(notif_list)}", icon="⚡")
+    st.success(f"⚡ **NOTIFICATION TRIGGERED:** Found {len(notif_list)} setup(s): **{', '.join(notif_list)}**")
+    render_notification_trigger(notif_list, sound_enabled=enable_sound_alert, desktop_enabled=enable_desktop_alert)
 
 # ── Layout Tabs ────────────────────────────────────────────────────────────────
 
@@ -876,5 +1018,6 @@ with tab3:
 
 # Autorefresh runner logic
 if auto_refresh:
+    st.sidebar.caption(f"⏱️ Auto-refresh active ({refresh_choice}). Next scan in {refresh_interval}s...")
     time.sleep(refresh_interval)
     st.rerun()
